@@ -1,8 +1,12 @@
 #!/bin/sh
 set -e
 
+function log {
+  echo "$(date -R -u): $1"
+}
+
 if [ -z "$REPO" ]; then
-  echo "Must specify REPO environment variable for repo to clone" >&2
+  log "Must specify REPO environment variable for repo to clone" >&2
   exit 1
 fi
 
@@ -23,14 +27,14 @@ sleepinterval=${INTERVAL:-300}
 execcommand=${CMD}
 kdir=${YMLDIR:=$gdir/kubernetes/}
 
-echo "cloning $REPO into $gdir"
+log "cloning $REPO into $gdir"
 git clone $REPO $gdir
 cd $gdir
 
 # loop forever
 while true; do
   # make sure it is up to date
-  echo "updating from $REPO"
+  log "updating from $REPO"
   # ensure we are at the most recent
   git checkout master --quiet
   git pull origin master --tags
@@ -40,21 +44,21 @@ while true; do
     tag=${commitandtag##* }
     tag=${tag##*/}
     commit=${commitandtag%% *}
-    echo "TAGONLY set, updating from latest tag ${tag} commit ${commit}"
+    log "TAGONLY set, updating from latest tag ${tag} commit ${commit}"
   else
     commit=$(git log --oneline --pretty=tformat:"%H" | head -1)
-    echo "updating from latest commit ${commit}"
+    log "updating from latest commit ${commit}"
   fi
   git checkout ${commit} --quiet
 
   if [ -n "$execcommand" ]; then
-    echo "Running transformation $execcommand"
+    log "Running transformation $execcommand"
     $execcommand
   else
-    echo "CMD empty, no transformation to run"
+    log "CMD empty, no transformation to run"
   fi
-  echo "applying kubectl to directory $kdir"
+  log "applying kubectl to directory $kdir"
   kubectl -s http://localhost:8080 apply -f $kdir
-  echo "done, awaiting next update in $sleepinterval seconds..."
+  log "done, awaiting next update in $sleepinterval seconds..."
   sleep $sleepinterval
 done
