@@ -1,8 +1,7 @@
 # Kubernetes AddOn Manager
-Kubernetes add-in manager to control deployment of your `kube-system` services, including networking, logging, metrics, etc. Run just this to get started and point it at a repo that
-has all of your other services.
+Kubernetes add-in manager to control deployment of your `kube-system` services, including networking, logging, metrics, etc. Run just this to get started and point it at a repo that has all of your other services.
 
-Every configurable amount of seconds, by default 300, will:
+Every configurable amount of seconds, by default 300, `kubernetes-addonmanager` will:
 
 1. `git pull` a git repo with all of your system-level add-ons
 2. Optionally, run a script in its root to do any pre-processing and transformation
@@ -10,6 +9,24 @@ Every configurable amount of seconds, by default 300, will:
 
 It is **expected** that this runs on a master, with `hostNetwork: true`, so it can use kubernetes at the insecure port of `http://localhost:8080`.
 
+## Addon Versions
+When selecting what to apply from `git`, it can be configured to use any one of the following:
+
+* Branch: use the latest commit from the given branch
+* Commit: use a specific commit
+* Tag: use a specific tag
+* Latest tag: use the most recent tag
+
+The purposes of each is different.
+
+* Commit and Tag: These provide the ability to stick with a very particular commit or tag until such time as you configure it differently.
+* Branch: Use the branch `master` if you always want the latest mainline `master` version to be applied. This usually is done in pre-production environments, but also can be in production environments. Conversely, by applying a specific non-`master` branch, you can apply non-`master` branches and test out changes before merging into `master`.
+* Latest tag: Use the most recent tag. This often is used in production environments, where applying a tag makes it deploy to production.
+
+Set the version mode using the configuration variable `VERSION_MODE`.
+
+
+## Configuration
 The following are configuration options:
 
 * `REPO`: full URL (https only) to the git repo. **Required**
@@ -17,8 +34,14 @@ The following are configuration options:
 * `CMD`: optional transformation command to run once repository is cloned or, after each interval, updated. If not provided, no transformation command is run.
 * `INTERVAL`: interval in seconds between first `git clone` and subsequent `git pull`, and each `git pull`, defaults to `300`
 * `YMLDIR`: directory where the yml files should be found, passed to `kubectl apply -f <YMLDIR>`. By default, `<GITDIR>/kubernetes/`, but may be different, e.g. if `CMD` puts the output files in a different directory.
-* `TAGONLY`: whether to apply the latest commit to `master` on the repo (unset `TAGONLY`), or only the most recent tag (`true`). Defaults to latest commit, i.e. unset. In general, this is used to control deployment to production vs other environments. In production, you might want to use `TAGONLY` so that only "blessed" changes go through.
+* `VERSION_MODE`: which mode to apply (see [addon-versions](#Addon_Versions) above). Select from the following:
+    * `branch:<branchname>`: apply latest commit from the given branch
+    * `branch:master`: apply latest commit from `master`. This is the default if no setting is provided.
+    * `commit:<commit>`: apply the specific commit. Can be the full commit hash or the short version.
+    * `tag:<tag>`: apply the specific tag.
+    * `tag:latest`: apply the most recent tag that is on a commit in `master`
 * `REPOCREDS`: if necessary and supplied, these credentials will be used to authenticate for the `REPO`. They should be in `<username>:<password>` format. If not supplied, and the repository requires credentials, it will fail.
+* `DRYRUN`: do not `kubectl apply` to the output, but run every other step
 
 Note that this can be run entirely _inside_ the pod, without any need for mapping local directories or storage. However, given that a `git clone` is expensive with large repositories, it is recommended to do this _only_ if the add-ons configuration repository is small.
 
@@ -84,4 +107,3 @@ spec:
 
 # LICENSE
 See [LICENSE](./LICENSE)
-
