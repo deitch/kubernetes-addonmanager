@@ -8,9 +8,10 @@ all: push
 tag:
 	@echo $(TAG)
 
+build: image
+
 image:
 	docker build -t $(IMAGE):$(TAG) .
 
 push: image
 	docker push $(IMAGE):$(TAG)
-
