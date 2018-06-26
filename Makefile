@@ -1,7 +1,16 @@
 .PHONY: all tag image push
 
 IMAGE ?= deitch/kubernetes-addonmanager
-TAG ?= $(shell git show --format=%T -s)
+HASH ?= $(shell git show --format=%T -s)
+
+# check if we should append a dirty tag
+DIRTY ?= $(shell git diff-index --quiet HEAD -- ; echo $$?)
+ifneq ($(DIRTY),0)
+TAG = $(HASH)-dirty
+else
+TAG = $(HASH)
+endif
+
 
 all: push
 
