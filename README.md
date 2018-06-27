@@ -1,5 +1,5 @@
-# Kubernetes AddOn Manager
-Kubernetes add-in manager to control deployment of your `kube-system` services, including networking, logging, metrics, etc. Run just this to get started and point it at a repo that has all of your other services.
+# KubeSync
+Kubernetes sync manager to control deployment of your `kube-system` services, including networking, logging, metrics, etc. Run just this to get started and point it at a repo that has all of your other services.
 
 Every configurable amount of seconds, by default 300, `kubesync` will:
 
