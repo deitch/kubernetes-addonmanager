@@ -1,6 +1,6 @@
 .PHONY: all tag image push
 
-IMAGE ?= deitch/kubernetes-addonmanager
+IMAGE ?= deitch/kubesync
 HASH ?= $(shell git show --format=%T -s)
 
 # check if we should append a dirty tag

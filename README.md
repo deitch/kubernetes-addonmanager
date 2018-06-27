@@ -1,7 +1,7 @@
 # Kubernetes AddOn Manager
 Kubernetes add-in manager to control deployment of your `kube-system` services, including networking, logging, metrics, etc. Run just this to get started and point it at a repo that has all of your other services.
 
-Every configurable amount of seconds, by default 300, `kubernetes-addonmanager` will:
+Every configurable amount of seconds, by default 300, `kubesync` will:
 
 1. `git pull` a git repo with all of your system-level add-ons
 2. Optionally, run a script in its root to do any pre-processing and transformation
@@ -51,7 +51,7 @@ Sample yml to deploy is below. This sample has **no** volume mounts.
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
-  name: kube-addon-manager
+  name: kubesync
   namespace: kube-system
   labels:
     kubernetes.io/cluster-service: "true"
@@ -63,11 +63,11 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      name: kube-addon-manager
+      name: kubesync
   template:
     metadata:
       labels:
-        name: kube-addon-manager
+        name: kubesync
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
         scheduler.alpha.kubernetes.io/tolerations: '[{"key":"CriticalAddonsOnly", "operator":"Exists"}]'
@@ -90,8 +90,8 @@ spec:
                   operator: In
                   values: ["master"]
       containers:
-      - name: kube-addon-manager
-        image: deitch/kubernetes-addonmanager:8f57a99980891ccc68701b94b94342f7ae0e02d6
+      - name: kubesync
+        image: deitch/kubesync:8f57a99980891ccc68701b94b94342f7ae0e02d6
         env:
         - name: REPO
           value: https://github.com/namespace/repo.git
