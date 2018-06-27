@@ -91,7 +91,7 @@ spec:
                   values: ["master"]
       containers:
       - name: kubesync
-        image: deitch/kubesync:8f57a99980891ccc68701b94b94342f7ae0e02d6
+        image: deitch/kubesync:3979032795afbee10324b5c75b84e25e7984fb55
         env:
         - name: REPO
           value: https://github.com/namespace/repo.git
