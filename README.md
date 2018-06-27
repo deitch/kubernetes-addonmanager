@@ -105,5 +105,10 @@ spec:
           value: /git/outdir
 ```
 
+# Design
+Currently kubesync is just a shell script running in a container with `kubectl` installed. It is possible to control all resources this way, but it is far better to do so using the kubernetes client-go.
+
+We plan eventually to migrate to go.
+
 # LICENSE
 See [LICENSE](./LICENSE)
