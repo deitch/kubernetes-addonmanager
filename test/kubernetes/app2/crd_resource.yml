@@ -1,0 +1,7 @@
+kind: Custom
+apiVersion: kubesync.com/v1alpha1
+metadata:
+  name: test
+  namespace: default
+spec:
+  foo: bar

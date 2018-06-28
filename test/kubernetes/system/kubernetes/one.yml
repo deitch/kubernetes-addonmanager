@@ -1,0 +1,20 @@
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: system-dameonset
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: weave
+  template:
+    metadata:
+      labels:
+        name: weave
+    spec:
+      containers:
+      - name: weave
+        image: weaveworks/weave-kube:2.2.0
+        securityContext:
+          privileged: true
+

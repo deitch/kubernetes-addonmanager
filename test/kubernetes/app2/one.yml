@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: app2-service
+  labels:
+    app: app2-service
+spec:
+  ports:
+  - port: 80
+    name: http
+    targetPort: http
+  selector:
+    name: app2-service
+---
+kind: StatefulSet
+apiVersion: apps/v1
+metadata:
+  name: app2-statefulset
+spec:
+  replicas: 3
+  serviceName: app2-service
+  selector:
+    matchLabels:
+      name: app2
+  template:
+    metadata:
+      labels:
+        name: app2
+    spec:
+      containers:
+      - name: app2
+        image: httpd
+        ports:
+        - containerPort: 80
+          name: http

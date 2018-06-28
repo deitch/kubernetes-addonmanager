@@ -44,6 +44,31 @@ Every configurable amount of seconds, by default 300, `kubesync` will:
 
 It is **expected** that this runs on a master, with `hostNetwork: true`, so it can use kubernetes at the insecure port of `http://localhost:8080`.
 
+### Algorithm
+For updating the cluster, there isn't anything fancy to do. It just does `kubectl apply -f ` to each directory containing resources.
+
+For removing (future support), `kubesync`, on each run, retrieves all of the following from the server:
+
+* pods
+* deployments
+* replicasets
+* statefulsets
+* secrets (optional)
+* configmaps
+* daemonsets
+* ingresses
+* services
+* customresourcedefinitions
+* all resources for each customresourcedefinition
+
+It retrieves each one in [json](https://json.org), and then checks the `'.metadata.ownerReferences'` property:
+
+* if it has one, this resource can be ignored, as it was created by some parent
+* if it has none, this resource was created on its own, we will check it
+
+It then checks if the resource (`Kind`,`Name`) tuple exists in the expected set, then it will be left alone, else it will be deleted.
+
+
 ## Versions
 When selecting what to apply from `git` the given repo, it can be configured to use any one of the following:
 
@@ -70,6 +95,8 @@ The following are configuration options. They are in two groups:
 ### Global
 
 * `CONFIG`: path to config file in the container. Defaults to `/kubesync.json`
+* `GIT_SSL_CAPATH`: path to a directory containing CA certificates that git should trust, in the container. Defaults to empty (use default system certificates).
+* `GIT_SSL_CAIFO`: path to a file containing CA certificates that git should trust, in the container. Defaults to empty (use default system certificates).
 * `INTERVAL`: interval in seconds between first `git clone` and subsequent `git pull`, and each `git pull`, defaults to `300`
 * `VERSION_MODE`: which mode to apply (see [addon-versions](#Addon_Versions) above). Select from the following:
     * `branch:<branchname>`: apply latest commit from the given branch
@@ -78,6 +105,7 @@ The following are configuration options. They are in two groups:
     * `tag:<tag>`: apply the specific tag.
     * `tag:latest`: apply the most recent tag that is on a commit in `master`
 * `REPOCREDS`: if supplied, these credentials will be used to authenticate for repos in `REPO`. They should be in `<username>:<password>` format. If not supplied, and any of the repositories require credentials, it will fail.
+* `KUBECTL_OPTIONS`: A string of options to pass to `kubectl`, e.g. `KUBECTL_OPTIONS="--kubeconfig=/some/path --context=mykube"`
 * `DRYRUN`: do not `kubectl apply` to the output, but run every other step
 
 Note that this can be run entirely _inside_ the pod, without any need for mapping local directories or storage. However, given that a `git clone` is expensive with large repositories, it is recommended to do this _only_ if the add-ons configuration repository is small.
@@ -89,7 +117,7 @@ The format of the config file is an array of objects, each of which has the foll
 
 * `url`: full URL (https only) to the git repo. **Required**
 * `cmd`: optional transformation command to run once repository is cloned or, after each interval, updated. If not provided, no transformation command is run. If the command specified by `cmd` does not exist, no transformation will be run. It is the equivalent of `[ -e $cmd ] && $cmd `.
-* `ymldir`: directory where the source yml files should be found, passed to `kubectl apply -f <YMLDIR>`. By default, `<repodir>/kubernetes/`, but may be different, e.g. if `cmd` puts the output files in a different directory.
+* `ymldir`: directory where the source yml files should be found, passed to `kubectl apply -f <YMLDIR>`. By default, root of the repository, but may be different, e.g. if `cmd` puts the output files in a different directory, for example `kubernetes/`.
 *  `priviliged`: whether or not the kubernetes files in this repo have the right to run privileged containers or install into `kube-system`. Defaults to `false`. **Not yet supported**. Until it is, _all_ repositories' `yml` foles can deploy privileged containers.
 
 `kubectl apply` reads the files from the following directory:
@@ -200,11 +228,22 @@ spec:
           name: kubesync-config
 ```
 
-# Design
+## Design
 Currently kubesync is a shell script running in a container with `kubectl` installed. It is possible to control all resources this way, but it is far better to do so using the kubernetes client-go.
 
 We plan eventually to migrate to go.
 
+## Building
+
+```
+make build
+``` 
+
+## Testing
+
+```
+make test
+```
 # LICENSE
 See [LICENSE](./LICENSE)
 
