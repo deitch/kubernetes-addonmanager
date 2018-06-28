@@ -28,7 +28,9 @@ sleepinterval=${INTERVAL:-300}
 execcommand=${CMD}
 
 
+# get the name of the repo, but be sure to remove .git off the end if it exists
 reponame=$(basename $REPO)
+reponame=${reponame%%.*git}
 
 targetdir=$gdir/$reponame
 tmpoutdir=$outdir/$reponame
