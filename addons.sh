@@ -22,15 +22,21 @@ fi
 mkdir -p /git
 
 # default download dir is /git/repo unless specified
-gdir=${GITDIR:-/git/repo}
+gdir=/git/src
+outdir=/git/out
 sleepinterval=${INTERVAL:-300}
 execcommand=${CMD}
-kdir=${YMLDIR:=$gdir/kubernetes/}
 
-log "cloning $REPO into $gdir"
+
+reponame=$(basename $REPO)
+
+targetdir=$gdir/$reponame
+tmpoutdir=$outdir/$reponame
+log "cloning $REPO into $targetdir"
 rm -rf $gdir
-git clone $REPO $gdir
-cd $gdir
+mkdir -p $gdir
+git clone $REPO $targetdir
+cd $targetdir
 
 # what mode are we in?
 if [ -z "$VERSION_MODE" ]; then
@@ -88,16 +94,25 @@ while true; do
 
   if [ -n "$execcommand" ]; then
     log "Running transformation $execcommand"
-    $execcommand
+    INDIR=$targetdir OUTDIR=$tmpoutdir $execcommand
+    log "kubernetes yml dir set to outdir $tmpoutdir"
+    kdir=$tmpoutdir 
+  else if [ -n "$YMLDIR" ]; then
+    log "CMD empty, no transformation to run"
+    log "kubernetes yml dir set to configured YMLDIR relative to repository root:  $YMLDIR"
+    kdir=$targetdir/$YMLDIR
   else
     log "CMD empty, no transformation to run"
+    log "kubernetes yml dir set to default relative to repository root: kubernetes/"
+    kdir=$targetdir/kubernetes
   fi
-  if [ -z "$DRYRUN" ]; then
-    log "applying kubectl to directory $kdir"
-    kubectl -s http://localhost:8080 apply -f $kdir
-  else
+
+  if [ -n "$DRYRUN" ]; then
     log "DRYRUN set, would have run: "
     log "kubectl -s http://localhost:8080 apply -f $kdir"
+  else
+    log "applying kubectl to directory $kdir"
+    kubectl -s http://localhost:8080 apply -f $kdir
   fi
   log "done, awaiting next update in $sleepinterval seconds..."
   sleep $sleepinterval
