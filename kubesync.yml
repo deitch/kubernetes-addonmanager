@@ -1,0 +1,7 @@
+- url: https://github.com/foo/kube-system
+  cmd: ./transform.sh
+  privileged: true
+- url: https://github.com/bar/app1
+  ymldir: kubernetes_dir/
+- url: https://github.com/zad/app2
+
