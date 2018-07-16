@@ -44,6 +44,31 @@ Every configurable amount of seconds, by default 300, `kubesync` will:
 
 It is **expected** that this runs on a master, with `hostNetwork: true`, so it can use kubernetes at the insecure port of `http://localhost:8080`.
 
+### Algorithm
+For updating the cluster, there isn't anything fancy to do. It just does `kubectl apply -f ` to each directory containing resources.
+
+For removing (future support), `kubesync`, on each run, retrieves all of the following from the server:
+
+* pods
+* deployments
+* replicasets
+* statefulsets
+* secrets (optional)
+* configmaps
+* daemonsets
+* ingresses
+* services
+* customresourcedefinitions
+* all resources for each customresourcedefinition
+
+It retrieves each one in [json](https://json.org), and then checks the `'.metadata.ownerReferences'` property:
+
+* if it has one, this resource can be ignored, as it was created by some parent
+* if it has none, this resource was created on its own, we will check it
+
+It then checks if the resource (`Kind`,`Name`) tuple exists in the expected set, then it will be left alone, else it will be deleted.
+
+
 ## Versions
 When selecting what to apply from `git` the given repo, it can be configured to use any one of the following:
 
@@ -62,39 +87,16 @@ Set the version mode using the configuration variable `VERSION_MODE`.
 
 
 ## Configuration
-The following are configuration options. All are set as environment variables. They are in two groups:
+The following are configuration options. They are in two groups:
 
-* Repo: Define repos and how to use them.
 * Global: Define how kubesync works.
-
-### Repo
-
-* `REPO`: full URL (https only) to the git repo. **Required**
-* `CMD`: optional transformation command to run once repository is cloned or, after each interval, updated. If not provided, no transformation command is run. If the file `CMD` does not exist, no transformation will be run. It is the equivalent of `[ -e $CMD ] && $CMD `.
-* `YMLDIR`: directory where the source yml files should be found, passed to `kubectl apply -f <YMLDIR>`. By default, `<repodir>/kubernetes/`, but may be different, e.g. if `CMD` puts the output files in a different directory.
-
-`kubectl apply` reads the files from the following directory:
-
-* If `CMD` is provided and exists, then `kubesync` **expects** the command to place its output files in the `kubesync`-provided directory in `$OUTDIR`, and will read files **only** from there. Else...
-* If no `CMD` is provided, or the value of `CMD` as an executable is not found, then the value of `YMLDIR` relative to the repository root. Else...
-* The directory `kubernetes/` relative to the repository root if it exists. Else...
-* The root of the reository.
-
-Note that the `CMD` will be passed the following environment variables when run:
-
-* `INDIR`: path to the repository as cloned locally. 
-* `OUTDIR`: path to a temporary directory, outside of the repo path but unique to this repository. The directory is cleaned and recreated before each `CMD` run.
-
-For example, if your command is `transform.sh`, and it wants to read the kubernetes files, which are in the repo in the subfolder `./kubernetes/`, and put them in a temporary working directory, following which `kubesync` will `kubectl apply <working_directory>`, it should set it as the following:
-
-```sh
-CMD=./transform.sh
-```
-
-Wherein `./transform.sh` will read its files from the value of `$INDIR` and place them in `$OUTDIR`.
+* Repo: Define repos and how to use them.
 
 ### Global
 
+* `CONFIG`: path to config file in the container. Defaults to `/kubesync.json`
+* `GIT_SSL_CAPATH`: path to a directory containing CA certificates that git should trust, in the container. Defaults to empty (use default system certificates).
+* `GIT_SSL_CAIFO`: path to a file containing CA certificates that git should trust, in the container. Defaults to empty (use default system certificates).
 * `INTERVAL`: interval in seconds between first `git clone` and subsequent `git pull`, and each `git pull`, defaults to `300`
 * `VERSION_MODE`: which mode to apply (see [addon-versions](#Addon_Versions) above). Select from the following:
     * `branch:<branchname>`: apply latest commit from the given branch
@@ -103,11 +105,69 @@ Wherein `./transform.sh` will read its files from the value of `$INDIR` and plac
     * `tag:<tag>`: apply the specific tag.
     * `tag:latest`: apply the most recent tag that is on a commit in `master`
 * `REPOCREDS`: if supplied, these credentials will be used to authenticate for repos in `REPO`. They should be in `<username>:<password>` format. If not supplied, and any of the repositories require credentials, it will fail.
+* `KUBECTL_OPTIONS`: A string of options to pass to `kubectl`, e.g. `KUBECTL_OPTIONS="--kubeconfig=/some/path --context=mykube"`
 * `DRYRUN`: do not `kubectl apply` to the output, but run every other step
 
 Note that this can be run entirely _inside_ the pod, without any need for mapping local directories or storage. However, given that a `git clone` is expensive with large repositories, it is recommended to do this _only_ if the add-ons configuration repository is small.
 
-Sample yml to deploy is below. This sample has **no** volume mounts.
+### Repo
+Repos are configured in a configuration file. The configuration file should be [json](http://www.json.org) or [yml](http://yaml.org). `kubesync` will try to parse the config file first as `json`, and then as `yml`. If both fail, the processing fails and exits.
+
+The format of the config file is an array of objects, each of which has the following properties:
+
+* `url`: full URL (https only) to the git repo. **Required**
+* `cmd`: optional transformation command to run once repository is cloned or, after each interval, updated. If not provided, no transformation command is run. If the command specified by `cmd` does not exist, no transformation will be run. It is the equivalent of `[ -e $cmd ] && $cmd `.
+* `ymldir`: directory where the source yml files should be found, passed to `kubectl apply -f <YMLDIR>`. By default, root of the repository, but may be different, e.g. if `cmd` puts the output files in a different directory, for example `kubernetes/`.
+*  `priviliged`: whether or not the kubernetes files in this repo have the right to run privileged containers or install into `kube-system`. Defaults to `false`. **Not yet supported**. Until it is, _all_ repositories' `yml` foles can deploy privileged containers.
+
+`kubectl apply` reads the files from the following directory:
+
+* If `cmd` is provided and exists, then `kubesync` **expects** the command to place its output files in the `kubesync`-provided directory in `$OUTDIR`, and will read files **only** from there. Else...
+* If no `cmd` is provided, or the value of `cmd` as an executable is not found, then the value of `ymldir` relative to the repository root. Else...
+* The directory `kubernetes/` relative to the repository root if it exists. Else...
+* The root of the reository.
+
+`cmd` will be passed the following environment variables when run:
+
+* `INDIR`: path to the repository as cloned locally. 
+* `OUTDIR`: path to a temporary directory, outside of the repo path but unique to this repository. The directory is cleaned and recreated before each `cmd` run.
+
+Thus, your command should read kubernetes files from wherever it feels relevant in its repo, which is rooted at `$INDIR`, and place its processed output at `$OUTDIR`. **`kubesync` will do `kubectl apply -f ` only to the `$OUTDIR` when a command is specified.**
+
+Wherein `./transform.sh` should read its files from the value of `$INDIR` and place them in `$OUTDIR`.
+
+## Sample Configuration
+
+The following are example repository configs. They also are included in this repository as `kubesync.json` and `kubesync.yml`, respectively.
+
+```json
+[
+  {
+    "url": "https://github.com/foo/kube-system",
+    "cmd": "./transform.sh",
+    "privileged": true
+  },
+  {
+    "url": "https://github.com/bar/app1",
+    "ymldir": "kubernetes_dir/"
+  },
+  {
+    "url": "https://github.com/zad/app2"
+  }
+]
+```
+
+```yml
+- url: https://github.com/foo/kube-system
+  cmd: ./transform.sh
+  privileged: true
+- url: https://github.com/bar/app1
+  ymldir: kubernetes_dir/
+- url: https://github.com/zad/app2
+```
+
+
+The following is sample kubernetes deployment `yml`:
 
 ```yml
 apiVersion: extensions/v1beta1
@@ -155,19 +215,35 @@ spec:
       - name: kubesync
         image: deitch/kubesync:3979032795afbee10324b5c75b84e25e7984fb55
         env:
-        - name: REPO
-          value: https://github.com/namespace/repo.git
-        - name: CMD
-          value: ./transform.sh -o $OUTDIR -i $INDIR
+        - name: CONFIG
+          value: /kubesync/kubesync.json
         - name: INTERVAL
           value: "300"
+        volumeMounts:
+        - name: config
+          mountPath: /kubesync
+      volumes:
+      - name: config
+        configMap:
+          name: kubesync-config
 ```
 
-# Design
-Currently kubesync is just a shell script running in a container with `kubectl` installed. It is possible to control all resources this way, but it is far better to do so using the kubernetes client-go.
+## Design
+Currently kubesync is a shell script running in a container with `kubectl` installed. It is possible to control all resources this way, but it is far better to do so using the kubernetes client-go.
 
 We plan eventually to migrate to go.
 
+## Building
+
+```
+make build
+``` 
+
+## Testing
+
+```
+make test
+```
 # LICENSE
 See [LICENSE](./LICENSE)
 

@@ -1,0 +1,35 @@
+version: '3.5'
+services:
+  etcd:
+    image: k8s.gcr.io/etcd-amd64:3.1.12
+    command: etcd --listen-client-urls 'http://0.0.0.0:2379'  --advertise-client-urls 'http://0.0.0.0:2379'
+    networks:
+    - kubesync
+
+  api:
+    image: k8s.gcr.io/hyperkube:v1.11.0
+    command: kube-apiserver --allow-privileged --etcd-servers http://etcd:2379 --insecure-bind-address 0.0.0.0 --insecure-port 8080
+    ports:
+    - "8080:8080"
+    networks:
+    - kubesync
+    depends_on:
+    - etcd
+    restart: always
+
+  git:
+    build:
+      context: .
+      dockerfile: Dockerfile.git
+    image: kubesync_git:test
+    networks:
+    - kubesync
+    ports:
+    - 443:443
+    
+
+networks:
+  kubesync:
+    driver: bridge
+    name: kubesync
+

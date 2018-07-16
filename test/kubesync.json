@@ -1,0 +1,12 @@
+[
+  {
+    "url": "https://git/system.git",
+    "ymldir": "kubernetes/"
+  },
+  {
+    "url": "https://git/app1.git"
+  },
+  {
+    "url": "https://git/app2.git"
+  }
+]
