@@ -115,7 +115,8 @@ preprocess() {
 
   if [ -n "$execcommand" ]; then
     log "INFO: Running transformation $execcommand"
-    INDIR=$targetdir OUTDIR=$tmpoutdir $execcommand
+    actualcommand=$(echo "$execcommand" | INDIR=$targetdir OUTDIR=$tmpoutdir envsubst)
+    INDIR=$targetdir OUTDIR=$tmpoutdir $actualcommand
     log "INFO: kubernetes yml dir set to outdir $tmpoutdir"
   elif [ -n "$ymldir" ]; then
     log "INFO: cmd empty, no transformation to run"

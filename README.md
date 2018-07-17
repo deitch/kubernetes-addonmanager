@@ -136,6 +136,15 @@ Thus, your command should read kubernetes files from wherever it feels relevant 
 
 Wherein `./transform.sh` should read its files from the value of `$INDIR` and place them in `$OUTDIR`.
 
+In addition, we run `envsubst` on the cmdline, so any usage of `$INDIR` or `$OUTDIR` would be translated correctly. Thus, you could do the following in the command-line:
+
+```json
+{
+  "cmd": "./transform.sh -indir $INDIR -outdir $OUTDIR",
+}
+```
+
+
 ## Sample Configuration
 
 The following are example repository configs. They also are included in this repository as `kubesync.json` and `kubesync.yml`, respectively.
