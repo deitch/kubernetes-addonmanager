@@ -40,26 +40,19 @@ image:
 push: image
 	docker push $(IMGTAG)
 
-test-start: 
-	cd test && docker-compose up -d
-
 test-stop:
 	cd test && docker-compose stop
 	cd test && docker-compose rm -f
-
-test-run: build build-test test-start
-	docker run --rm --network=kubesync -v /var/run/docker.sock:/var/run/docker.sock -v $(SOURCEDIR):/test -e DEBUG=$(DEBUG) -e RUNDIR=/test -e SOURCEDIR=$(SOURCEDIR) -e IMAGE=$(IMGTAG) $(TESTIMAGE) 
-test-run-interactive: build build-test test-start
-	docker run -it --rm --network=kubesync -v /var/run/docker.sock:/var/run/docker.sock -v $(SOURCEDIR):/test -e DEBUG=true -e RUNDIR=/test -e SOURCEDIR=$(SOURCEDIR)  -e IMAGE=$(IMGTAG) --entrypoint=sh $(TESTIMAGE)
 
 build-test:
 	docker build -t $(TESTIMAGE) -f ./test/Dockerfile.test ./test/
 	
 # runs the entire test - its dependencies, then the test, then tear down
-test:
-	$(MAKE) test-start
-	$(MAKE) test-run
-	$(MAKE) test-stop
+test: build build-test
+	cd test && DEBUG=$(DEBUG) TOOLIMAGE=$(TESTIMAGE) IMAGE=$(IMGTAG) ./test.sh
+
+test-debug:
+	$(MAKE) test DEBUG=true
 
 test-certs:
 	cd test && openssl req -newkey rsa:2048 -keyout key.pem -nodes -x509 -days 365 -out certificate.pem -extensions req_ext  -config ./ssl.cnf

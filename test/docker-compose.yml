@@ -26,6 +26,9 @@ services:
     - kubesync
     ports:
     - 443:443
+    volumes:
+    - ./kubesync.json:/config/kubesync.json:ro
+
     
 
 networks:

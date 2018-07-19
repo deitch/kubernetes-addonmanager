@@ -5,35 +5,60 @@ set -e
 
 # dependencies to run:
 #  - docker (to launch, start and stop kubesync)
-#  - git (to make commits and push)
-#  - tr/fold/head (to modify/generate text)
-#  - kubectl (to talk to kube cluster)
-#  - jq (to process json)
-#  - yq (to process yml)
+#  - docker-compose (to launch, start and stop backing services)
 
-# we must be told where the source dir is so we can do a docker run and mount volumes
-if [ -z "$SOURCEDIR" ]; then
-  echo "Must have SOURCEDIR set" >&2
-  exit 1
-fi
+# everything else is in the container
 
 
 # where does everything live?
-RUNDIR=${RUNDIR:-/test}
-KUBECONFIG=${KUBECONFIG:-${RUNDIR}/kubeconfig}
+RUNDIR=${RUNDIR:-${PWD}}
+CRUNDIR=${CRUNDIR:-/test}
+
+# what is the container image that has all of our tools?
+if [ -z "$TOOLIMAGE" ]; then
+    echo "FATAL: env var TOOLIMAGE must be set with the image that has our testing tools" >&2
+    exit 1
+fi
+if [ -z "$IMAGE" ]; then
+    echo "FATAL: env var IMAGE must be set with the image that runs kubesync" >&2
+    exit 1
+fi
 
 # pause between actions and their load
 PAUSE=10
 # basic run command
-alias drun="docker run --network=kubesync -d -v $SOURCEDIR:/test:ro -e CONFIG=/test/kubesync.json -e KUBECTL_OPTIONS='--kubeconfig=/test/kubeconfig --context=kube' -e INTERVAL=5 -e REPOCREDS=git:git -e GIT_SSL_CAINFO=/test/certificate.pem  -e DEBUG=${DEBUG}"
+alias drun="docker run --network=kubesync -d -v $RUNDIR:$CRUNDIR:ro -e KUBECTL_OPTIONS='--kubeconfig=$CRUNDIR/kubeconfig --context=kube' -e CURL_OPTIONS='--cacert $CRUNDIR/certificate.pem' -e INTERVAL=5 -e REPOCREDS=git:git -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem  -e DEBUG=${DEBUG} "
+alias git="docker run -i -u ${UID:-$(id -u)} --rm --network=kubesync -v $RUNDIR:$CRUNDIR -v $RUNDIR/gitconfig:/etc/gitconfig:ro -v $RUNDIR/git-credentials:/etc/git-credentials:ro -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem $TOOLIMAGE git"
+alias kubectl="docker run -i --rm --network=kubesync -v $RUNDIR:$CRUNDIR $TOOLIMAGE kubectl --kubeconfig=$CRUNDIR/kubeconfig --context=kube "
+alias jq="docker run -i --rm $TOOLIMAGE jq"
+alias yq="docker run -i --rm $TOOLIMAGE yq"
 
+
+stop_services() {
+  docker-compose -f $RUNDIR/docker-compose.yml kill
+  docker-compose -f $RUNDIR/docker-compose.yml rm -f
+}
+
+start_services() {
+  docker-compose -f $RUNDIR/docker-compose.yml up -d
+}
+
+init_repos() {
+  # basic setup
+  rm -rf $RUNDIR/tmp/
+  mkdir -p $RUNDIR/tmp/
+
+  for i in app1 app2 system; do
+    git clone https://git/$i.git $CRUNDIR/tmp/$i
+  done
+}
+
+#
 commit_and_push() {
   local basedir=$1
-  (
-  cd $basedir/tmp/app1; git add *; git diff-index --quiet HEAD || git commit -m "First commit"; git push origin master
-  cd $basedir/tmp/app2; git add *; git diff-index --quiet HEAD || git commit -m "First commit"; git push origin master
-  cd $basedir/tmp/system; git add *; git diff-index --quiet HEAD || git commit -m "First commit"; git push origin master
-  )
+  git -C $basedir/tmp/app1 add .; git -C $basedir/tmp/app1 diff-index --quiet HEAD || git -C $basedir/tmp/app1 commit -m "First commit"; git -C $basedir/tmp/app1 push origin master
+  git -C $basedir/tmp/app2 add .; git -C $basedir/tmp/app2 diff-index --quiet HEAD || git -C $basedir/tmp/app2 commit -m "First commit"; git -C $basedir/tmp/app2 push origin master
+  git -C $basedir/tmp/system add .; git -C $basedir/tmp/system diff-index --quiet HEAD || git -C $basedir/tmp/system commit -m "First commit"; git -C $basedir/tmp/system push origin master
 }
 
 testit() {
@@ -51,20 +76,20 @@ testit() {
   # dump the actual
   # get all of the things we care about
   for i in secret pod replicaset deployment statefulset configmap ingress service; do
-    kubectl --kubeconfig=$KUBECONFIG --context=kube get $i --all-namespaces -ojson | jq '.items |= map(select(.metadata.ownerReferences == null))' > $tmpdir/stage/$i.json
+    kubectl get $i --all-namespaces -ojson | jq '.items |= map(select(.metadata.ownerReferences == null))' > $tmpdir/stage/$i.json
     cat $tmpdir/stage/$i.json | jq -r '.items[].metadata.name' > $tmpdir/stage/$i.txt
   done
 
   # we need a different loop for CRDs, because the names of them are different
   for i in customresourcedefinition; do
-    kubectl --kubeconfig=$KUBECONFIG --context=kube get $i --all-namespaces -ojson | jq '.items |= map(select(.metadata.ownerReferences == null))' > $tmpdir/stage/$i.json
+    kubectl get $i --all-namespaces -ojson | jq '.items |= map(select(.metadata.ownerReferences == null))' > $tmpdir/stage/$i.json
     cat $tmpdir/stage/$i.json | jq -r '.items[].spec.names.kind | ascii_downcase' > $tmpdir/stage/$i.txt
   done
 
   # get the customresourcedefinitions themselves
   # if any CRDs exist, get all of each type
   for i in $(cat $tmpdir/stage/customresourcedefinition.txt); do
-    kubectl --kubeconfig=$KUBECONFIG --context=kube get $i --all-namespaces -ojson > $tmpdir/stage/$i.json
+    kubectl get $i --all-namespaces -ojson > $tmpdir/stage/$i.json
     cat $tmpdir/stage/$i.json | jq -r '.items[].metadata.name' > $tmpdir/stage/$i.txt
   done
 
@@ -101,19 +126,18 @@ testit() {
       fi 
 
       # check that the resource matches
+      # tendency to add annotations that did not exist, so we ignore annotations
       local actual=
       if [ "$kind" = "customresourcedefinition" ]; then
         # if it is a customresourcedefinition, then:
         # - use spec.names.kind instead of .metadata.name to avoid the funky naming
         # - delete the namespace that is added as blank
-        actual=$(cat $tmpdir/stage/$kind.json | jq -r -c --arg name $name '.items[] | select(.spec.names.kind | ascii_downcase == $name) ' )
+        actual=$(cat $tmpdir/stage/$kind.json | jq -r -c --arg name $name '.items[] | select(.spec.names.kind | ascii_downcase == $name) | .metadata.annotations."kubectl.kubernetes.io/last-applied-configuration" | fromjson | del(.metadata.annotations)' )
       else
         # if there is no namespace given and is not crd, add it
         expected=$( echo $expected | jq -r -c ".metadata.namespace |= (if . == null then \"default\" else . end)" )
-        actual=$(cat $tmpdir/stage/$kind.json | jq -r -c --arg name $name '.items[] | select(.metadata.name | ascii_downcase == $name)' )
+        actual=$(cat $tmpdir/stage/$kind.json | jq -r -c --arg name $name '.items[] | select(.metadata.name | ascii_downcase == $name) | .metadata.annotations."kubectl.kubernetes.io/last-applied-configuration" | fromjson | del(.metadata.annotations)' )
       fi
-      # tendency to add annotations that did not exist, so we ignore annotations
-      actual=$(echo $actual | jq -r -c '.metadata.annotations."kubectl.kubernetes.io/last-applied-configuration" | fromjson | del(.metadata.annotations)' )
 
       # delete blank namespaces
       actual=$(echo $actual | jq -r -c 'if .metadata.namespace == ""  then del(.metadata.namespace) else . end')
@@ -134,105 +158,138 @@ testit() {
     echo "PASS $section"
   fi
 }
+runtest() {
+  local name="$1"
+  local pause="$2"
+  local rundir="$3"
+  local crundir="$4"
+  local cplist="$5"
 
-# disable ssl cert checking for git because we are using a self-signed cert
-git config --global http.sslVerify false
-git config --global credential.helper 'store --file ~/.git-credentials'
-git config --global credential.https://git.username git
-git config --global user.name git
-git config --global user.email "git@kubesync.com"
+  local src=
+  local target=
+  local targetdir=
+ 
+  for i in $cplist; do
+    # split on : to find source and target
+    src=${i%%:*}
+    target=${i##*:}
+    # make sure the dir exists
+    targetdir=$(dirname $target)
+    if [ ! -d $rundir/tmp/$targetdir ]; then
+      mkdir -p $rundir/tmp/$targetdir
+    fi
+    cp $rundir/kubernetes/$src $rundir/tmp/$target
+  done
 
-echo "https://git:git@git/app1.git" >> ~/.git-credentials
-echo "https://git:git@git/app2.git" >> ~/.git-credentials
-echo "https://git:git@git/system.git" >> ~/.git-credentials
+  commit_and_push $crundir >&2
 
-# basic setup
-rm -rf $RUNDIR/tmp/
-mkdir -p $RUNDIR/tmp/
-
-(cd $RUNDIR/tmp
-git clone https://git/app1.git
-git clone https://git/app2.git
-git clone https://git/system.git
-)
-
-#
-# testing system includes kubernetes directory
-mkdir -p $RUNDIR/tmp/system/kubernetes
+  # wait and test
+  sleep $pause >&2
+  tmptest=$(testit $name $rundir)
+  echo "$tmptest"
+}
 
 RESULTS=
+ALLCID=
 
-######
-# 
-# master mode
+CONFIGPATHS="$CRUNDIR/kubesync.json file://$CRUNDIR/kubesync.json http://git/config/kubesync.json https://git/config/kubesync.json"
+VERSIONMODES="branch:master"
+
+########
 #
-######
-# run with master mode
-CID=$(drun -e VERSION_MODE=branch:master $IMAGE)
-
-cp $RUNDIR/kubernetes/app1/one.yml $RUNDIR/tmp/app1/kube.yml
-cp $RUNDIR/kubernetes/app2/one.yml $RUNDIR/tmp/app2/kube.yml
-cp $RUNDIR/kubernetes/system/kubernetes/one.yml $RUNDIR/tmp/system/kubernetes/kube.yml
-
-commit_and_push $RUNDIR
-
-# wait and test
-sleep $PAUSE
-tmptest=$(testit one $RUNDIR)
-# output them here in case anything crashes later
-echo "$tmptest"
-RESULTS="$RESULTS"$'\n'"$tmptest"
-
+# Test different VERSION_MODE settings
 #
-# change deployment property and increase replica count, and add resources
-cp $RUNDIR/kubernetes/app1/two.yml $RUNDIR/tmp/app1/kube.yml
-cp $RUNDIR/kubernetes/app2/two.yml $RUNDIR/tmp/app2/kube.yml
+#######
 
-commit_and_push $RUNDIR
+for mode in $VERSIONMODES; do
+    stop_services
+    start_services
+    init_repos
 
-# wait and test
-sleep $PAUSE
-tmptest=$(testit two $RUNDIR)
-# output them here in case anything crashes later
-echo "$tmptest"
-RESULTS="$RESULTS"$'\n'"$tmptest"
+    # run with master mode
+    CID=$(drun -e CONFIG=$CRUNDIR/kubesync.json -e VERSION_MODE=$mode $IMAGE)
+    ALLCID="$ALLCID $CID"
 
+    tmptest=$(runtest one $PAUSE $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml")
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    RESULTS="$RESULTS"$'\n'"$tmptest"
+
+    if echo "$tmptest" | grep -q -i fail ; then
+      docker logs $CID
+    fi
+
+    #
+    # change deployment property and increase replica count, and add resources
+    tmptest=$(runtest two $PAUSE $RUNDIR $CRUNDIR "app1/two.yml:app1/kube.yml app2/two.yml:app2/kube.yml")
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    RESULTS="$RESULTS"$'\n'"$tmptest"
+
+    #
+    # add CRD
+    tmptest=$(runtest crd $PAUSE $RUNDIR $CRUNDIR "app1/crd.yml:app1/crd.yml")
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    RESULTS="$RESULTS"$'\n'"$tmptest"
+
+    #
+    # add item based on CRD
+    tmptest=$(runtest crd_resource $PAUSE $RUNDIR $CRUNDIR "app2/crd_resource.yml:app2/crd_resource.yml")
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    RESULTS="$RESULTS"$'\n'"$tmptest"
+
+    docker stop $CID
+
+    stop_services
+done
+
+########
 #
-# add CRD
-cp $RUNDIR/kubernetes/app1/crd.yml $RUNDIR/tmp/app1/
-
-commit_and_push $RUNDIR
-
-# wait and test
-sleep $PAUSE
-tmptest=$(testit crd $RUNDIR)
-# output them here in case anything crashes later
-echo "$tmptest"
-RESULTS="$RESULTS"$'\n'"$tmptest"
-
+# Test different config location settings
 #
-# add item based on CRD
-cp $RUNDIR/kubernetes/app2/crd_resource.yml $RUNDIR/tmp/app2/
+#######
+for path in $CONFIGPATHS; do
+  # clean out and set up repos
+  stop_services
+  start_services
+  init_repos
 
-commit_and_push $RUNDIR
+  CID=$(drun -e CONFIG=$path -e VERSION_MODE=branch:master $IMAGE)
+  ALLCID="$ALLCID $CID"
 
-# wait and test
-sleep $PAUSE
-tmptest=$(testit crd_resource $RUNDIR)
-# output them here in case anything crashes later
-echo "$tmptest"
-RESULTS="$RESULTS"$'\n'"$tmptest"
+  # do a basic install
+  tmptest=$(runtest config:$path $PAUSE $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml")
+  # output them here in case anything crashes later
+  echo "$tmptest"
+  RESULTS="$RESULTS"$'\n'"$tmptest"
 
-### END
-docker stop $CID
+  docker stop $CID
+
+done
+
+#####
+#
+# cleanup
+#
+#####
 
 # we do not remove the container in case we need the logs
 if [ -z "$DEBUG " ]; then
-  docker rm $CID
+  docker rm $ALLCID
 fi
 
 echo
 echo "FINAL"
 echo "$RESULTS"
 echo
+
+# did we pass everything?
+if echo "$RESULTS" | grep -q FAIL ; then
+exit 1
+else
+exit 0
+fi
+   	kubectl $KUBECTL_OPTIONS apply -f $ymldir
 

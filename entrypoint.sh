@@ -7,6 +7,67 @@ log() {
   echo "$(date -R -u): $1"
 }
 
+getconfig() {
+  local configurl="$1"
+  local configpath=
+  local config=
+
+  # the config file could be one of several types
+  case $configurl in
+    /*)
+      # does it exist?
+      if [ ! -e ${configurl} ]; then
+        log "FATAL: Config file ${configurl} does not exist, exiting" >&2
+        exit 1
+      fi
+      config=$(cat ${configurl})
+      ;;
+    file://*)
+      configpath=${configurl##file://}
+      # does it exist?
+      if [ ! -e ${configpath} ]; then
+        log "FATAL: Config file ${configurl} does not exist, exiting" >&2
+        exit 1
+      fi
+      config=$(cat ${configpath})
+      ;;
+    http://*|https://*)
+      set +e
+      config=$(curl $CURL_OPTIONS -L ${configurl})
+      result=$?
+      set -e
+      if [ $result -ne 0 ]; then
+        log "FATAL: Could not retrieve config from url ${configurl}, exiting" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "FATAL: Unknown config file format in env var CONFIG: $configurl">&2
+      exit 1
+      ;;
+  esac
+  
+  if [ -z "${config}" ]; then
+    echo "FATAL: config at ${configurl} is empty" >&2
+    exit 1
+  fi
+
+  # convert to json for advanced processing
+  json=$(echo ${config} | yq r -j - )
+  
+  # it must be an array or error out
+  set +e
+  echo $json | jq -e '. | type == "array"'
+  result=$?
+  set -e
+  if [ $result -ne 0 ]; then
+    log "FATAL: Config file does not contain array, exiting" >&2
+    exit 1
+  fi
+
+  echo ${json}
+}
+
 repotodir() {
   local url=$1
   reponame=$(basename $url)
@@ -160,8 +221,8 @@ fi
 
 # we download repos to per-repo subdirs of /git/src
 # processed output goes to per-repo subdirs /git/out
-gdir=/git/src
-outdir=/git/out
+gdir=$HOME/git/src
+outdir=$HOME/git/out
 sleepinterval=${INTERVAL:-300}
 
 # clean up everything at beginning
@@ -192,26 +253,9 @@ fi
 # Process config file
 #
 #####
-config=${CONFIG:-/kubesync.json}
+configurl=${CONFIG:-/kubesync.json}
 
-# does it exist?
-if [ ! -e ${config} ]; then
-  log "FATAL: Config file ${config} does not exist, exiting" >&2
-  exit 1
-fi
-
-# convert to json for advanced processing
-json=$(cat ${config} | yq r -j - )
-
-# it must be an array or error out
-set +e
-echo $json | jq -e '. | type == "array"'
-result=$?
-set -e
-if [ $result -ne 0 ]; then
-  log "FATAL: Config file does not contain array, exiting" >&2
-  exit 1
-fi
+json=$(getconfig $configurl)
 
 # count how many repos we have?
 count=$(echo $json | jq '. | length')

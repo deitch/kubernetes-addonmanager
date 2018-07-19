@@ -17,4 +17,6 @@ RUN chmod +x /usr/local/bin/yq
 
 ADD entrypoint.sh /usr/local/bin/entrypoint
 
+RUN addgroup kubesync && adduser  -D -G kubesync kubesync
+USER kubesync
 CMD ["/usr/local/bin/entrypoint"]

@@ -94,7 +94,11 @@ The following are configuration options. They are in two groups:
 
 ### Global
 
-* `CONFIG`: path to config file in the container. Defaults to `/kubesync.json`
+* `CONFIG`: config file location. Defaults to `/kubesync.json`. Can be one of:
+    * `/path`: absolute path relative to the container
+    * `file://path`: absolute path relative to the container
+    * `http://path`: http URL
+    * `https://path`: https URL
 * `GIT_SSL_CAPATH`: path to a directory containing CA certificates that git should trust, in the container. Defaults to empty (use default system certificates).
 * `GIT_SSL_CAIFO`: path to a file containing CA certificates that git should trust, in the container. Defaults to empty (use default system certificates).
 * `INTERVAL`: interval in seconds between first `git clone` and subsequent `git pull`, and each `git pull`, defaults to `300`
@@ -106,6 +110,7 @@ The following are configuration options. They are in two groups:
     * `tag:latest`: apply the most recent tag that is on a commit in `master`
 * `REPOCREDS`: if supplied, these credentials will be used to authenticate for repos in `REPO`. They should be in `<username>:<password>` format. If not supplied, and any of the repositories require credentials, it will fail.
 * `KUBECTL_OPTIONS`: A string of options to pass to `kubectl`, e.g. `KUBECTL_OPTIONS="--kubeconfig=/some/path --context=mykube"`
+* `CURL_OPTIONS`: A string of options to pass to `curl`, if used when downloading config from `http://` or `https://` urls, e.g. `CURL_OPTIONS="--capath /var/lib/certs"`. This is the place to include SSL options, e.g. a custom cert, and http authentication options.
 * `DRYRUN`: do not `kubectl apply` to the output, but run every other step
 
 Note that this can be run entirely _inside_ the pod, without any need for mapping local directories or storage. However, given that a `git clone` is expensive with large repositories, it is recommended to do this _only_ if the add-ons configuration repository is small.
