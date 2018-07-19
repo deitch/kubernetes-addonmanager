@@ -14,7 +14,4 @@ RUN chmod +x /usr/local/bin/kubectl
 RUN curl -o /usr/local/bin/yq -LO https://github.com/mikefarah/yq/releases/download/${YQVERSION}/yq_linux_amd64
 RUN chmod +x /usr/local/bin/yq
 
-COPY test.sh /usr/local/bin/test.sh
-
-CMD ["test.sh"]
 

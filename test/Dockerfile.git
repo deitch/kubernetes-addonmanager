@@ -1,10 +1,10 @@
 FROM alpine:3.7
 
-RUN apk --update add git nginx git-daemon fcgiwrap spawn-fcgi
+RUN apk --update add git nginx git-daemon fcgiwrap spawn-fcgi curl
 
 RUN mkdir /run/nginx /var/log/git
 RUN rm /etc/nginx/conf.d/default.conf
-COPY nginx.conf /etc/nginx/conf.d/git.conf
+COPY nginx /etc/nginx/conf.d/
 COPY htpasswd /etc/nginx/htpasswd
 
 # ensure that the nginx group can write here

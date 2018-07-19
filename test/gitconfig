@@ -1,0 +1,9 @@
+[http]
+        sslVerify = false
+[credential "https://git"]
+        username = git
+[user]
+        name = git
+        email = git@kubesync.com
+[credential]
+        helper = store --file /etc/git-credentials
