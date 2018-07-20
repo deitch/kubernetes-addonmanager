@@ -25,14 +25,22 @@ if [ -z "$IMAGE" ]; then
 fi
 
 # pause between actions and their load
-PAUSE=10
+PAUSE=3
 # basic run command
-alias drun="docker run --network=kubesync -d -v $RUNDIR:$CRUNDIR:ro -e KUBECTL_OPTIONS='--kubeconfig=$CRUNDIR/kubeconfig --context=kube' -e CURL_OPTIONS='--cacert $CRUNDIR/certificate.pem' -e INTERVAL=5 -e REPOCREDS=git:git -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem  -e DEBUG=${DEBUG} "
+alias drun="docker run --network=kubesync -d -v $RUNDIR:$CRUNDIR:ro -e KUBECTL_OPTIONS='--kubeconfig=$CRUNDIR/kubeconfig --context=kube' -e CURL_OPTIONS='--cacert $CRUNDIR/certificate.pem' -e INTERVAL=1 -e REPOCREDS=git:git -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem  -e DEBUG=${DEBUG} "
 alias git="docker run -i -u ${UID:-$(id -u)} --rm --network=kubesync -v $RUNDIR:$CRUNDIR -v $RUNDIR/gitconfig:/etc/gitconfig:ro -v $RUNDIR/git-credentials:/etc/git-credentials:ro -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem $TOOLIMAGE git"
 alias kubectl="docker run -i --rm --network=kubesync -v $RUNDIR:$CRUNDIR $TOOLIMAGE kubectl --kubeconfig=$CRUNDIR/kubeconfig --context=kube "
 alias jq="docker run -i --rm $TOOLIMAGE jq"
 alias yq="docker run -i --rm $TOOLIMAGE yq"
 
+setconfig() {
+  local confdir="$1"
+  local target="$2"
+
+  rm -f $confdir/kubesync.json
+  ln -s $target $confdir/kubesync.json
+  
+}
 
 stop_services() {
   docker-compose -f $RUNDIR/docker-compose.yml kill
@@ -44,11 +52,12 @@ start_services() {
 }
 
 init_repos() {
+  local repolist="$1"
   # basic setup
   rm -rf $RUNDIR/tmp/
   mkdir -p $RUNDIR/tmp/
 
-  for i in app1 app2 system; do
+  for i in $repolist; do
     git clone https://git/$i.git $CRUNDIR/tmp/$i
   done
 }
@@ -56,9 +65,16 @@ init_repos() {
 #
 commit_and_push() {
   local basedir=$1
-  git -C $basedir/tmp/app1 add .; git -C $basedir/tmp/app1 diff-index --quiet HEAD || git -C $basedir/tmp/app1 commit -m "First commit"; git -C $basedir/tmp/app1 push origin master
-  git -C $basedir/tmp/app2 add .; git -C $basedir/tmp/app2 diff-index --quiet HEAD || git -C $basedir/tmp/app2 commit -m "First commit"; git -C $basedir/tmp/app2 push origin master
-  git -C $basedir/tmp/system add .; git -C $basedir/tmp/system diff-index --quiet HEAD || git -C $basedir/tmp/system commit -m "First commit"; git -C $basedir/tmp/system push origin master
+  local repos="$2"
+  local gitst=
+
+  for r in $repos; do
+    # only do work if something has changed
+    gitst=$(git -C $basedir/tmp/$r status --porcelain 2>/dev/null)
+    if [ -n "$gitst" ]; then
+      git -C $basedir/tmp/$r add .; git -C $basedir/tmp/$r commit -m "First commit"; git -C $basedir/tmp/$r push origin master
+    fi
+  done
 }
 
 testit() {
@@ -75,7 +91,7 @@ testit() {
   mkdir -p $tmpdir/actual $tmpdir/stage
   # dump the actual
   # get all of the things we care about
-  for i in secret pod replicaset deployment statefulset configmap ingress service; do
+  for i in secret pod replicaset deployment statefulset configmap ingress service daemonset; do
     kubectl get $i --all-namespaces -ojson | jq '.items |= map(select(.metadata.ownerReferences == null))' > $tmpdir/stage/$i.json
     cat $tmpdir/stage/$i.json | jq -r '.items[].metadata.name' > $tmpdir/stage/$i.txt
   done
@@ -98,9 +114,8 @@ testit() {
   # now check each item in each of our expected directories, and see if:
   # a- it exists
   # b- it is configured correctly
-  cd $basedir/tmp
   # check each yml file
-  for i in */*.yml; do
+  for i in $(find $basedir/tmp -name '*.yml'); do
     # as json
     json=$(cat $i | yq r -j -d'*' -)
     count=$(echo $json | jq '. | length')
@@ -181,7 +196,7 @@ runtest() {
     cp $rundir/kubernetes/$src $rundir/tmp/$target
   done
 
-  commit_and_push $crundir >&2
+  commit_and_push $crundir "app1 app2 app3 system" >&2
 
   # wait and test
   sleep $pause >&2
@@ -192,7 +207,7 @@ runtest() {
 RESULTS=
 ALLCID=
 
-CONFIGPATHS="$CRUNDIR/kubesync.json file://$CRUNDIR/kubesync.json http://git/config/kubesync.json https://git/config/kubesync.json"
+CONFIGPATHS="$CRUNDIR/config/kubesync.json file://$CRUNDIR/config/kubesync.json http://git/config/kubesync.json https://git/config/kubesync.json"
 VERSIONMODES="branch:master"
 
 ########
@@ -201,13 +216,16 @@ VERSIONMODES="branch:master"
 #
 #######
 
+# set the original config
+setconfig $RUNDIR/config kubesync-original.json
+
 for mode in $VERSIONMODES; do
     stop_services
     start_services
-    init_repos
+    init_repos "app1 app2 app3 system"
 
     # run with master mode
-    CID=$(drun -e CONFIG=$CRUNDIR/kubesync.json -e VERSION_MODE=$mode $IMAGE)
+    CID=$(drun -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=$mode $IMAGE)
     ALLCID="$ALLCID $CID"
 
     tmptest=$(runtest one $PAUSE $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml")
@@ -254,7 +272,7 @@ for path in $CONFIGPATHS; do
   # clean out and set up repos
   stop_services
   start_services
-  init_repos
+  init_repos "app1 app2 app3 system"
 
   CID=$(drun -e CONFIG=$path -e VERSION_MODE=branch:master $IMAGE)
   ALLCID="$ALLCID $CID"
@@ -268,6 +286,41 @@ for path in $CONFIGPATHS; do
   docker stop $CID
 
 done
+
+########
+#
+# Test changing config file dynamically
+#
+#######
+# set the original config
+setconfig $RUNDIR/config kubesync-original.json
+
+# clean out and set up repos
+stop_services
+start_services
+init_repos "app1 app2 app3 system"
+
+CID=$(drun -e CONFIG=$path -e VERSION_MODE=branch:master $IMAGE)
+ALLCID="$ALLCID $CID"
+
+# do an install with the original config
+tmptest=$(runtest config:dynamic-original $PAUSE $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml")
+# output them here in case anything crashes later
+echo "$tmptest"
+RESULTS="$RESULTS"$'\n'"$tmptest"
+
+# set the modified config
+setconfig $RUNDIR/config kubesync-modified.json
+
+# do an install with the original config
+tmptest=$(runtest config:dynamic-modified $PAUSE $RUNDIR $CRUNDIR "app3/one.yml:app3/kube.yml")
+# output them here in case anything crashes later
+echo "$tmptest"
+RESULTS="$RESULTS"$'\n'"$tmptest"
+
+docker stop $CID
+
+
 
 #####
 #
@@ -291,5 +344,4 @@ exit 1
 else
 exit 0
 fi
-   	kubectl $KUBECTL_OPTIONS apply -f $ymldir
 
