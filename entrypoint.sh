@@ -55,9 +55,9 @@ getconfig() {
   # convert to json for advanced processing
   json=$(echo ${config} | yq r -j - )
   
-  # it must be an array or error out
+  # it must be an array or error out - but do not actually output the result, just catch the error code
   set +e
-  echo $json | jq -e '. | type == "array"'
+  echo $json | jq -e '. | type == "array"' >/dev/null
   result=$?
   set -e
   if [ $result -ne 0 ]; then
@@ -255,41 +255,6 @@ fi
 #####
 configurl=${CONFIG:-/kubesync.json}
 
-json=$(getconfig $configurl)
-
-# count how many repos we have?
-count=$(echo $json | jq '. | length')
-
-#####
-#
-# Initialize repos
-#
-#####
-
-# loop through the repos
-j=0
-while [ $j -lt $count ]; do
-  repo=$(echo $json | jq -r ".[$j].url")
-
-  # we need a repo
-  if [ -z "$repo" ]; then
-    log "FATAL: Repository $j in config does not have a repo defined as property 'url'" >&2
-    exit 1
-  fi
-
-  # were credentials provided? if so, save them
-  if [ -n "$password" ]; then
-    git config --global credential.${repo}.username ${username}
-    echo "https://${username}:${password}@${repo##https://}" >> ~/.git-credentials
-  fi
-
-  # get the repo
-  getrepo ${repo} ${gdir}
-
-  j=$(( j + 1 ))
-done
-
-
 #####
 # 
 # keep up to date
@@ -298,6 +263,30 @@ done
 
 # loop forever
 while true; do
+  # refresh our repo list
+  json=$(getconfig $configurl)
+
+  # count how many repos we have?
+  count=$(echo $json | jq '. | length')
+
+  ####
+  # 
+  # check each repo in stage/ dir via its name and remote. If it isn't in config, get rid of it.
+  # 
+  ####
+  allurls=$(echo $json | jq -r '.[].url')
+  for dir in $gdir/*; do
+    [ -d $dir ] || continue
+    remoteurl=$(git -C $dir remote get-url origin || echo)
+    if [ -z "$remoteurl" ]; then
+      log "INFO: $dir has no remote named origin, deleting."
+      rm -rf $dir
+    elif ! echo $remoteurl | grep -q $allurls; then
+      log "INFO: $dir has remote url $remoteurl which is not in our config, deleting."
+      rm -rf $dir
+    fi
+  done 
+ 
   # go to each repo
   # loop through the repos
   j=0
@@ -307,12 +296,29 @@ while true; do
     ymldir=$(echo $json | jq -r ".[$j] | select(.ymldir) | .ymldir")
     reponame=$(repotodir $repo)
 
+    # we need a repo
+    if [ -z "$repo" ]; then
+      log "ERROR: Repository $j in config does not have a repo defined as property 'url'" >&2
+      exit 1
+    fi
+
     cd $gdir 
 
     # clean up old output directory
     tmpoutdir=$outdir/$reponame
     rm -rf $tmpoutdir
     mkdir -p $tmpoutdir
+
+    # make sure we already have the repo cloned
+    if [ ! -d $gdir/$reponame ]; then
+      # were credentials provided? if so, save them
+      if [ -n "$password" ]; then
+        git config --global credential.${repo}.username ${username}
+        echo "https://${username}:${password}@${repo##https://}" >> ~/.git-credentials
+      fi
+
+      getrepo $repo $gdir
+    fi
 
     # do the rest from within the repo
     cd $gdir/$reponame
