@@ -7,6 +7,13 @@ log() {
   echo "$(date -R -u): $1"
 }
 
+run_with_args() {
+  while IFS= read -r entry; do
+    set -- "$@" "$entry"
+  done
+  "$@"
+}
+
 getconfig() {
   local configurl="$1"
   local configpath=
@@ -33,7 +40,7 @@ getconfig() {
       ;;
     http://*|https://*)
       set +e
-      config=$(curl $CURL_OPTIONS -L ${configurl})
+      config=$(printf " %s" $CURL_OPTIONS -L ${configurl} | xargs printf "%s\n" | run_with_args curl)
       result=$?
       set -e
       if [ $result -ne 0 ]; then
@@ -200,7 +207,7 @@ apply() {
     log "INFO: kubectl $KUBECTL_OPTIONS apply -f $ymldir"
   else
     log "INFO: applying kubectl to directory $ymldir"
-    kubectl $KUBECTL_OPTIONS apply -f $ymldir
+    printf " %s" $KUBECTL_OPTIONS apply -f $ymldir | xargs printf "%s\n" | run_with_args kubectl
     if [ $? -ne 0 ]; then
       log "ERROR: unable to apply kubectl due to error, skipping..."
       return 1
