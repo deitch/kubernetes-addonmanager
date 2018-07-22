@@ -221,8 +221,17 @@ apply() {
 username=
 password=
 if [ -n "$REPOCREDS" ]; then
-  username=${REPOCREDS%%:*}
-  password=${REPOCREDS#*:}
+  # if there is no ":" then username=REPOCREDS and password=""
+  case $REPOCREDS in
+    *:*)
+      username=${REPOCREDS%%:*}
+      password=${REPOCREDS#*:}
+      ;;
+    *)
+      username=${REPOCREDS}
+      password=
+      ;;
+  esac
   git config --global credential.helper 'store --file ~/.git-credentials'
 fi
 
@@ -319,7 +328,8 @@ while true; do
     # make sure we already have the repo cloned
     if [ ! -d $gdir/$reponame ]; then
       # were credentials provided? if so, save them
-      if [ -n "$password" ]; then
+      # we do not need ot check if the password exists; empty passwords are fine
+      if [ -n "$username" ]; then
         git config --global credential.${repo}.username ${username}
         echo "https://${username}:${password}@${repo##https://}" >> ~/.git-credentials
       fi
