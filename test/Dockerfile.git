@@ -13,12 +13,6 @@ RUN chmod g+w /var/run/fcgiwrap
 RUN mkdir /etc/privatecerts/
 COPY *.pem /etc/privatecerts/
 
-# make our server-side repos
-RUN for dir in app1 app2 app3 system; do \
-    mkdir -p /git/$dir.git;  \
-    git -C /git/$dir.git init --bare; \
-    done
-
 ENTRYPOINT []
 CMD spawn-fcgi -M 2660 -g www-data -s /var/run/fcgiwrap/fcgiwrap.sock /usr/bin/fcgiwrap && nginx "-g daemon off;"
 

@@ -41,15 +41,15 @@ push: image
 	docker push $(IMGTAG)
 
 test-stop:
-	cd test && docker-compose stop
-	cd test && docker-compose rm -f
+	docker-compose -f ./test/docker-compose.yml stop
+	docker-compose -f ./test/docker-compose.yml rm -f
 
 build-test:
 	docker build -t $(TESTIMAGE) -f ./test/Dockerfile.test ./test/
 	
 # runs the entire test - its dependencies, then the test, then tear down
 test: build build-test
-	cd test && DEBUG=$(DEBUG) TOOLIMAGE=$(TESTIMAGE) IMAGE=$(IMGTAG) ./test.sh
+	DEBUG=$(DEBUG) TOOLIMAGE=$(TESTIMAGE) IMAGE=$(IMGTAG) RUNDIR=${CURDIR}/test ./test/test.sh $(TESTS)
 
 test-debug:
 	$(MAKE) test DEBUG=true

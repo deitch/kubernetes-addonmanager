@@ -7,11 +7,35 @@ log() {
   echo "$(date -R -u): $1"
 }
 
-run_with_args() {
-  while IFS= read -r entry; do
-    set -- "$@" "$entry"
+runcmd() {
+  local cmd="$1"
+  shift
+  local args="$@"
+  set -- $cmd
+  IFS=$'\n'
+  for i in $( printf " %s" ${args} | xargs printf "%s\n" ); do
+    set -- "$@" "$i"
   done
   "$@"
+}
+
+genrole() {
+  local namespace="$1"
+  cat <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubesync
+  namespace: ${namespace}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+- kind: User
+  name: kubesync-limited
+  apiGroup: rbac.authorization.k8s.io
+EOF
 }
 
 getconfig() {
@@ -40,7 +64,7 @@ getconfig() {
       ;;
     http://*|https://*)
       set +e
-      config=$(printf " %s" $CURL_OPTIONS -L ${configurl} | xargs printf "%s\n" | run_with_args curl)
+      config=$(runcmd curl $CURL_OPTIONS -L ${configurl} )
       result=$?
       set -e
       if [ $result -ne 0 ]; then
@@ -207,7 +231,7 @@ apply() {
     log "INFO: kubectl $KUBECTL_OPTIONS apply -f $ymldir"
   else
     log "INFO: applying kubectl to directory $ymldir"
-    printf " %s" $KUBECTL_OPTIONS apply -f $ymldir | xargs printf "%s\n" | run_with_args kubectl
+    runcmd kubectl $KUBECTL_OPTIONS apply -f $ymldir
     if [ $? -ne 0 ]; then
       log "ERROR: unable to apply kubectl due to error, skipping..."
       return 1
@@ -215,6 +239,94 @@ apply() {
   fi
 
   set -e
+}
+
+# base loop that performs the update and apply
+run() {
+  local configurl="$1"
+  local gdir="$2"
+  local outdir="$3"
+  local username="$4"
+  local password="$5"
+  local versiontype="$6"
+  local versiondetail="$7"
+
+  # update RoleBindings for each namespace
+  local namespaces=$(runcmd kubectl $KUBECTL_OPTIONS get namespace --field-selector=metadata.name!=kube-system -o custom-columns=name:metadata.name --no-headers )
+  for n in $namespaces; do
+    genrole $n | runcmd kubectl $KUBECTL_OPTIONS apply -f -
+  done
+  
+
+  # refresh our repo list
+  json=$(getconfig $configurl)
+
+  # count how many repos we have?
+  count=$(echo $json | jq '. | length')
+
+  ####
+  # 
+  # check each repo in stage/ dir via its name and remote. If it isn't in config, get rid of it.
+  # 
+  ####
+  allurls=$(echo $json | jq -r '.[].url')
+  for dir in $gdir/*; do
+    [ -d $dir ] || continue
+    remoteurl=$(git -C $dir remote get-url origin || echo)
+    if [ -z "$remoteurl" ]; then
+      log "INFO: $dir has no remote named origin, deleting."
+      rm -rf $dir
+    elif ! echo $remoteurl | grep -q $allurls; then
+      log "INFO: $dir has remote url $remoteurl which is not in our config, deleting."
+      rm -rf $dir
+    fi
+  done 
+ 
+  # go to each repo
+  # loop through the repos
+  j=0
+  while [ $j -lt $count ]; do
+    repo=$(echo $json | jq -r ".[$j].url")
+    cmd=$(echo $json | jq -r ".[$j] | select(.cmd) | .cmd")
+    ymldir=$(echo $json | jq -r ".[$j] | select(.ymldir) | .ymldir")
+    reponame=$(repotodir $repo)
+
+    # we need a repo
+    if [ -z "$repo" ]; then
+      log "ERROR: Repository $j in config does not have a repo defined as property 'url'" >&2
+      exit 1
+    fi
+
+    cd $gdir 
+
+    # clean up old output directory
+    tmpoutdir=$outdir/$reponame
+    rm -rf $tmpoutdir
+    mkdir -p $tmpoutdir
+
+    # make sure we already have the repo cloned
+    if [ ! -d $gdir/$reponame ]; then
+      # were credentials provided? if so, save them
+      # we do not need ot check if the password exists; empty passwords are fine
+      if [ -n "$username" ]; then
+        git config --global credential.${repo}.username ${username}
+        echo "https://${username}:${password}@${repo##https://}" >> ~/.git-credentials
+      fi
+
+      getrepo $repo $gdir
+    fi
+
+    # do the rest from within the repo
+    cd $gdir/$reponame
+
+    update_repo
+    checkout_version $versiontype $versiondetail || (j=$(( $j + 1 )) && continue)
+    preprocess "$cmd" "$PWD" "$tmpoutdir" "$ymldir"
+    apply "$tmpoutdir" "$DRYRUN" || (j=$(( $j + 1 )) && continue)
+
+    j=$(( $j + 1 ))
+  done
+  log "INFO: done"
 }
 
 # were credentials provided?
@@ -279,76 +391,14 @@ configurl=${CONFIG:-/kubesync.json}
 
 # loop forever
 while true; do
-  # refresh our repo list
-  json=$(getconfig $configurl)
+  run $configurl $gdir $outdir "$username" "$password" $versiontype $versiondetail
 
-  # count how many repos we have?
-  count=$(echo $json | jq '. | length')
+  if [ -n "$ONCE" ]; then
+    log "INFO: ONCE=${ONCE} exiting."
+    break
+  fi
 
-  ####
-  # 
-  # check each repo in stage/ dir via its name and remote. If it isn't in config, get rid of it.
-  # 
-  ####
-  allurls=$(echo $json | jq -r '.[].url')
-  for dir in $gdir/*; do
-    [ -d $dir ] || continue
-    remoteurl=$(git -C $dir remote get-url origin || echo)
-    if [ -z "$remoteurl" ]; then
-      log "INFO: $dir has no remote named origin, deleting."
-      rm -rf $dir
-    elif ! echo $remoteurl | grep -q $allurls; then
-      log "INFO: $dir has remote url $remoteurl which is not in our config, deleting."
-      rm -rf $dir
-    fi
-  done 
- 
-  # go to each repo
-  # loop through the repos
-  j=0
-  while [ $j -lt $count ]; do
-    repo=$(echo $json | jq -r ".[$j].url")
-    cmd=$(echo $json | jq -r ".[$j] | select(.cmd) | .cmd")
-    ymldir=$(echo $json | jq -r ".[$j] | select(.ymldir) | .ymldir")
-    reponame=$(repotodir $repo)
-
-    # we need a repo
-    if [ -z "$repo" ]; then
-      log "ERROR: Repository $j in config does not have a repo defined as property 'url'" >&2
-      exit 1
-    fi
-
-    cd $gdir 
-
-    # clean up old output directory
-    tmpoutdir=$outdir/$reponame
-    rm -rf $tmpoutdir
-    mkdir -p $tmpoutdir
-
-    # make sure we already have the repo cloned
-    if [ ! -d $gdir/$reponame ]; then
-      # were credentials provided? if so, save them
-      # we do not need ot check if the password exists; empty passwords are fine
-      if [ -n "$username" ]; then
-        git config --global credential.${repo}.username ${username}
-        echo "https://${username}:${password}@${repo##https://}" >> ~/.git-credentials
-      fi
-
-      getrepo $repo $gdir
-    fi
-
-    # do the rest from within the repo
-    cd $gdir/$reponame
-
-    update_repo
-    checkout_version $versiontype $versiondetail || continue
-    preprocess "$cmd" "$PWD" "$tmpoutdir" "$ymldir"
-    apply "$tmpoutdir" "$DRYRUN" || continue
-
-    j=$(( j + 1 ))
-  done
-
-  log "INFO: done, awaiting next update in $sleepinterval seconds..."
+  log "INFO: awaiting next update in $sleepinterval seconds..."
   sleep $sleepinterval
 done
 
