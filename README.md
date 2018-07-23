@@ -39,10 +39,13 @@ Your CD environment is a less secure environment than your production (or likely
 Every configurable amount of seconds, by default 300, `kubesync` will:
 
 1. `git pull` one or more git repos with all of your configurations
-2. Optionally, run a script in each repo to do any pre-processing and transformation
-3. `kubectl apply -f <directory>`, where directory is, by default, `kubernetes/` under each provided repo
+2. Optionally, run a preprocessor command in each repo to do any pre-processing and transformation
+3. `kubectl apply -f <directory>`, where directory is one of:
+    * the output of the optional pre-processor in step 2 above
+    * the root directory of the repository (default behavious)
+    * a different, explicitly configured directory in the repository
 
-It is **expected** that this runs on a master, with `hostNetwork: true`, so it can use kubernetes at the insecure port of `http://localhost:8080`.
+It is **expected** that this runs on a master, with `hostNetwork: true`, so it can run without waiting for any workers or the CNI network to be ready.
 
 ### Algorithm
 For updating the cluster, there isn't anything fancy to do. It just does `kubectl apply -f ` to each directory containing resources.
@@ -113,10 +116,8 @@ The following are configuration options. They are in two groups:
 * `CURL_OPTIONS`: A string of options to pass to `curl`, if used when downloading config from `http://` or `https://` urls, e.g. `CURL_OPTIONS="--capath /var/lib/certs"`. This is the place to include SSL options, e.g. a custom cert, and http authentication options.
 * `DRYRUN`: do not `kubectl apply` to the output, but run every other step
 
-Note that this can be run entirely _inside_ the pod, without any need for mapping local directories or storage. However, given that a `git clone` is expensive with large repositories, it is recommended to do this _only_ if the add-ons configuration repository is small.
-
 ### Repo
-Repos are configured in a configuration file. The configuration file should be [json](http://www.json.org) or [yml](http://yaml.org). `kubesync` will try to parse the config file first as `json`, and then as `yml`. If both fail, the processing fails and exits.
+Repos with the actual resources to sync to your kubernetes cluster are configured in a configuration file. The configuration file should be [json](http://www.json.org) or [yml](http://yaml.org). `kubesync` will try to parse the config file first as `json`, and then as `yml`. If both fail, the processing fails and exits.
 
 The format of the config file is an array of objects, each of which has the following properties:
 
@@ -129,7 +130,6 @@ The format of the config file is an array of objects, each of which has the foll
 
 * If `cmd` is provided and exists, then `kubesync` **expects** the command to place its output files in the `kubesync`-provided directory in `$OUTDIR`, and will read files **only** from there. Else...
 * If no `cmd` is provided, or the value of `cmd` as an executable is not found, then the value of `ymldir` relative to the repository root. Else...
-* The directory `kubernetes/` relative to the repository root if it exists. Else...
 * The root of the reository.
 
 `cmd` will be passed the following environment variables when run:
@@ -180,66 +180,16 @@ The following are example repository configs. They also are included in this rep
 - url: https://github.com/zad/app2
 ```
 
+## Deployment
+A sample deployment `yml` is available at [./kubesync-deploy.yml](./kubesync-deploy.yml). It can be deployed as is, or can be modified to suit your requirements.
 
-The following is sample kubernetes deployment `yml`:
+To deploy it as is:
 
-```yml
-apiVersion: extensions/v1beta1
-kind: Deployment
-metadata:
-  name: kubesync
-  namespace: kube-system
-  labels:
-    kubernetes.io/cluster-service: "true"
-spec:
-  replicas: 1
-  strategy:
-    rollingUpdate:
-      maxSurge: 10%
-      maxUnavailable: 0
-  selector:
-    matchLabels:
-      name: kubesync
-  template:
-    metadata:
-      labels:
-        name: kubesync
-      annotations:
-        scheduler.alpha.kubernetes.io/critical-pod: ''
-        scheduler.alpha.kubernetes.io/tolerations: '[{"key":"CriticalAddonsOnly", "operator":"Exists"}]'
-    spec:
-      tolerations:
-        - effect: NoSchedule
-          operator: Exists
-        - key: node.kubernetes.io/network-unavailable
-          effect: NoSchedule
-          operator: Exists
-        - key: "CriticalAddonsOnly"
-          operator: "Exists"
-      # we specifically want to run on master
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                - key: kubernetes.io/role
-                  operator: In
-                  values: ["master"]
-      containers:
-      - name: kubesync
-        image: deitch/kubesync:3979032795afbee10324b5c75b84e25e7984fb55
-        env:
-        - name: CONFIG
-          value: /kubesync/kubesync.json
-        - name: INTERVAL
-          value: "300"
-        volumeMounts:
-        - name: config
-          mountPath: /kubesync
-      volumes:
-      - name: config
-        configMap:
-          name: kubesync-config
+1. Ensure you have a secret named `kubesync` in the `kube-system` namespace with the configuration parameters you desire (see above).
+2. Either download it and make it part of your cluster boot, or simply 
+
+```
+kubectl apply -f https://raw.githubusercontent.com/deitch/kubesync/master/kubesync-deploy.yml
 ```
 
 ## Design
