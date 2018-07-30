@@ -3,6 +3,20 @@ set -e
 
 [ -n "$DEBUG" ] && set -x
 
+echo "Start test: $(date -R -u)"
+TESTSTART=$(date +%s)
+
+doexit() {
+  local exitcode=$1
+  TESTEND=$(date +%s)
+  echo "End test: $(date -R -u)" >&2
+  TESTTIME=$(( TESTEND - TESTSTART ))
+  TESTMINS=$(( TESTTIME / 60 ))
+  TESTSECS=$(( TESTTIME % 60 ))
+  echo "Test time: ${TESTMINS}:${TESTSECS} "
+  exit $exitcode
+}
+
 # dependencies to run:
 #  - docker (to launch, start and stop kubesync)
 #  - docker-compose (to launch, start and stop backing services)
@@ -11,23 +25,25 @@ set -e
 
 
 # where does everything live?
-RUNDIR=${RUNDIR:-${PWD}}
+RUNDIR=${RUNDIR:-$(basename $0)}
 CRUNDIR=${CRUNDIR:-/test}
 
 # what is the container image that has all of our tools?
 if [ -z "$TOOLIMAGE" ]; then
     echo "FATAL: env var TOOLIMAGE must be set with the image that has our testing tools" >&2
-    exit 1
+    doexit 1
 fi
 if [ -z "$IMAGE" ]; then
     echo "FATAL: env var IMAGE must be set with the image that runs kubesync" >&2
-    exit 1
+    doexit 1
 fi
 
 # pause between actions and their load
 PAUSE=3
 # basic run command
-alias drun="docker run --network=kubesync -d -v $RUNDIR:$CRUNDIR:ro -e KUBECTL_OPTIONS='--kubeconfig=$CRUNDIR/kubeconfig --context=kube' -e CURL_OPTIONS='--cacert $CRUNDIR/certificate.pem' -e INTERVAL=1 -e REPOCREDS=git:git -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem  -e DEBUG=${DEBUG} "
+alias drun="docker run --network=kubesync -v $RUNDIR:$CRUNDIR:ro -e KUBECTL_OPTIONS='--kubeconfig=$CRUNDIR/kubeconfig --context=kube' -e CURL_OPTIONS='--cacert $CRUNDIR/certificate.pem' -e INTERVAL=10 -e REPOCREDS=git:git -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem  -e DEBUG=${DEBUG} "
+alias drunonce="drun --rm -e ONCE=true"
+alias drund="drun -d"
 alias git="docker run -i -u ${UID:-$(id -u)} --rm --network=kubesync -v $RUNDIR:$CRUNDIR -v $RUNDIR/gitconfig:/etc/gitconfig:ro -v $RUNDIR/git-credentials:/etc/git-credentials:ro -e GIT_SSL_CAINFO=$CRUNDIR/certificate.pem $TOOLIMAGE git"
 alias kubectl="docker run -i --rm --network=kubesync -v $RUNDIR:$CRUNDIR $TOOLIMAGE kubectl --kubeconfig=$CRUNDIR/kubeconfig --context=kube "
 alias jq="docker run -i --rm $TOOLIMAGE jq"
@@ -43,17 +59,43 @@ setconfig() {
 }
 
 stop_services() {
-  docker-compose -f $RUNDIR/docker-compose.yml kill
-  docker-compose -f $RUNDIR/docker-compose.yml rm -f
+  docker-compose -f $RUNDIR/docker-compose.yml kill >&2
+  docker-compose -f $RUNDIR/docker-compose.yml rm -f >&2
 }
 
 start_services() {
-  docker-compose -f $RUNDIR/docker-compose.yml up -d
+  local kubealive=1
+  docker-compose -f $RUNDIR/docker-compose.yml up -d >&2
+  # make sure API server is ready
+  for i in $(seq 10); do
+    set +e 
+    kubectl get ns >/dev/null
+    result=$?
+    set -e 
+    if [ $result -eq 0 ]; then
+      kubealive=0
+      break
+    else 
+      sleep 1
+    fi
+  done
+  # did we get it?
+  if [ $kubealive -ne 0 ]; then
+    echo "FAIL: could not connect to kube in 5 seconds" >&2
+    doexit 1
+  fi
 }
 
 init_repos() {
   local repolist="$1"
-  # basic setup
+
+  # make our server-side repos
+  for dir in $repolist; do
+    docker-compose -f $RUNDIR/docker-compose.yml exec git sh -c "rm -rf /git/$dir.git && mkdir -p /git/$dir.git && git -C /git/$dir.git init --bare" >&2
+  done
+
+
+  # clone locally
   rm -rf $RUNDIR/tmp/
   mkdir -p $RUNDIR/tmp/
 
@@ -173,12 +215,10 @@ testit() {
     echo "PASS $section"
   fi
 }
-runtest() {
-  local name="$1"
-  local pause="$2"
-  local rundir="$3"
-  local crundir="$4"
-  local cplist="$5"
+copy_and_commit() {
+  local rundir="$1"
+  local crundir="$2"
+  local cplist="$3"
 
   local src=
   local target=
@@ -197,12 +237,204 @@ runtest() {
   done
 
   commit_and_push $crundir "app1 app2 app3 system" >&2
+}
 
+
+######
+#
+# TESTS
+#
+######
+
+# to run all
+#ALLTESTS="versionmodes configpaths dynamicconfig rolebinding privileged"
+ALLTESTS="versionmodes configpaths dynamicconfig rolebinding"
+
+# Test different VERSION_MODE settings
+test_versionmodes() {
+  local tmptest=
+  local results=
+
+  # set the original config
+  setconfig $RUNDIR/config kubesync-original.json
+
+  for mode in $VERSIONMODES; do
+    stop_services
+    start_services
+    init_repos "app1 app2 app3 system"
+
+    # run with master mode
+    CID=$(drund -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=$mode $IMAGE)
+    ALLCID="$ALLCID $CID"
+
+    copy_and_commit $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml"
+    # wait and test
+    sleep $PAUSE >&2
+    tmptest=$(testit versionmodes:one $RUNDIR)
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    results="$results"$'\n'"$tmptest"
+
+    if echo "$tmptest" | grep -q -i fail ; then
+      docker logs $CID >&2
+    fi
+
+    #
+    # change deployment property and increase replica count, and add resources
+    copy_and_commit $RUNDIR $CRUNDIR "app1/two.yml:app1/kube.yml app2/two.yml:app2/kube.yml"
+    # wait and test
+    sleep $PAUSE >&2
+    tmptest=$(testit versionmodes:two $RUNDIR)
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    results="$results"$'\n'"$tmptest"
+
+    #
+    # add CRD
+    copy_and_commit $RUNDIR $CRUNDIR "app1/crd.yml:app1/crd.yml"
+    # wait and test
+    sleep $PAUSE >&2
+    tmptest=$(testit versionmodes:crd $RUNDIR)
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    results="$results"$'\n'"$tmptest"
+
+    #
+    # add item based on CRD
+    copy_and_commit $RUNDIR $CRUNDIR "app2/crd_resource.yml:app2/crd_resource.yml"
+    # wait and test
+    sleep $PAUSE >&2
+    tmptest=$(testit versionmodes:crd_resource $RUNDIR)
+    # output them here in case anything crashes later
+    echo "$tmptest"
+    results="$results"$'\n'"$tmptest"
+
+    docker stop $CID >&2
+
+    stop_services
+  done
+  echo "$results"
+}
+
+# Test different config location settings
+test_configpaths() {
+ local tmptest=
+ local results=
+  for path in $CONFIGPATHS; do
+  # clean out and set up repos
+    stop_services
+    start_services
+    init_repos "app1 app2 app3 system"
+
+    # do a basic install
+    # no need to pause when used runonce
+    copy_and_commit $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml"
+
+    # run it to update
+    OUTPUT=$(drunonce -e CONFIG=$path -e VERSION_MODE=branch:master $IMAGE)
+
+    tmptest=$(testit configpaths:$path $RUNDIR)
+    # output them here in case anything crashes later
+    results="$results"$'\n'"$tmptest"
+
+
+  done
+  echo "$results"
+}
+
+# Test changing config file dynamically
+test_dynamicconfig() {
+  local tmptest=
+  local results=
+  # set the original config
+  setconfig $RUNDIR/config kubesync-original.json
+
+  # clean out and set up repos
+  stop_services
+  start_services
+  init_repos "app1 app2 app3 system"
+
+  CID=$(drund -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=branch:master $IMAGE)
+  ALLCID="$ALLCID $CID"
+
+  # do an install with the original config
+  copy_and_commit $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml"
   # wait and test
-  sleep $pause >&2
-  tmptest=$(testit $name $rundir)
+  sleep $PAUSE >&2
+  tmptest=$(testit dynamicconfig:original $RUNDIR)
+
+  results="$results"$'\n'"$tmptest"
+
+  # set the modified config
+  setconfig $RUNDIR/config kubesync-modified.json
+
+  # do an install with the modified config
+  copy_and_commit $RUNDIR $CRUNDIR "app3/one.yml:app3/kube.yml"
+  # wait and test
+  sleep $PAUSE >&2
+  tmptest=$(testit dynamicconfig:modified $RUNDIR)
+  results="$results"$'\n'"$tmptest"
+
+  docker stop $CID >&2
+  echo "$results"
+}
+
+# Test automatic RoleBinding creation
+test_rolebinding() {
+  local tmptest=
+  # set the original config
+  setconfig $RUNDIR/config kubesync-original.json
+
+  # clean out and set up repos
+  stop_services
+  start_services
+  init_repos "app1 app2 app3 system"
+
+  # create a namespace - this should trigger creating the role
+  testnamespace=roletest
+  kubectl create namespace $testnamespace >&2
+
+  OUTPUT=$(drunonce -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=branch:master $IMAGE)
+
+  # check that the role exists
+  exists=$(kubectl get rolebinding -n $testnamespace kubesync -oname --no-headers 2>/dev/null)
+
+  if [ -n "$exists" ]; then
+    tmptest="PASS: namespace-role-creatione"
+  else
+    tmptest="FAIL: namespace-role-creation exists:role/$testnamespace/kubesync"
+  fi
+
+  # output them here in case anything crashes later
   echo "$tmptest"
 }
+
+# Test privileged and unprivileged
+test_privileged() {
+  # set the original config
+  setconfig $RUNDIR/config kubesync-original.json
+
+  # clean out and set up repos
+  stop_services
+  start_services
+  init_repos "app1 app2 app3 system"
+
+  # do an install with the original config
+  copy_and_commit $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml"
+
+  # run it to update
+  OUTPUT=$(drunonce -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=branch:master $IMAGE)
+
+  tmptest=$(testit privileged $RUNDIR)
+  echo "$tmptest"
+}
+
+
+######
+#
+# MAIN
+#
+######
 
 RESULTS=
 ALLCID=
@@ -210,117 +442,28 @@ ALLCID=
 CONFIGPATHS="$CRUNDIR/config/kubesync.json file://$CRUNDIR/config/kubesync.json http://git/config/kubesync.json https://git/config/kubesync.json"
 VERSIONMODES="branch:master"
 
-########
-#
-# Test different VERSION_MODE settings
-#
-#######
+# did we have a specific test listed?
+if [ $# -gt 0 ]; then
+  testlist=$@
+else
+  testlist="$ALLTESTS"
+fi
 
-# set the original config
-setconfig $RUNDIR/config kubesync-original.json
+if [ "$1" = "help" ]; then
+  echo "Usage:"
+  echo "$0 <test1> <test2> ... <testn>"
+  echo
+  echo "leave test list blank to run all"
+  echo "Available tests: $ALLTESTS"
+  doexit 1
+fi
 
-for mode in $VERSIONMODES; do
-    stop_services
-    start_services
-    init_repos "app1 app2 app3 system"
-
-    # run with master mode
-    CID=$(drun -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=$mode $IMAGE)
-    ALLCID="$ALLCID $CID"
-
-    tmptest=$(runtest one $PAUSE $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml")
-    # output them here in case anything crashes later
-    echo "$tmptest"
-    RESULTS="$RESULTS"$'\n'"$tmptest"
-
-    if echo "$tmptest" | grep -q -i fail ; then
-      docker logs $CID
-    fi
-
-    #
-    # change deployment property and increase replica count, and add resources
-    tmptest=$(runtest two $PAUSE $RUNDIR $CRUNDIR "app1/two.yml:app1/kube.yml app2/two.yml:app2/kube.yml")
-    # output them here in case anything crashes later
-    echo "$tmptest"
-    RESULTS="$RESULTS"$'\n'"$tmptest"
-
-    #
-    # add CRD
-    tmptest=$(runtest crd $PAUSE $RUNDIR $CRUNDIR "app1/crd.yml:app1/crd.yml")
-    # output them here in case anything crashes later
-    echo "$tmptest"
-    RESULTS="$RESULTS"$'\n'"$tmptest"
-
-    #
-    # add item based on CRD
-    tmptest=$(runtest crd_resource $PAUSE $RUNDIR $CRUNDIR "app2/crd_resource.yml:app2/crd_resource.yml")
-    # output them here in case anything crashes later
-    echo "$tmptest"
-    RESULTS="$RESULTS"$'\n'"$tmptest"
-
-    docker stop $CID
-
-    stop_services
-done
-
-########
-#
-# Test different config location settings
-#
-#######
-for path in $CONFIGPATHS; do
-  # clean out and set up repos
-  stop_services
-  start_services
-  init_repos "app1 app2 app3 system"
-
-  CID=$(drun -e CONFIG=$path -e VERSION_MODE=branch:master $IMAGE)
-  ALLCID="$ALLCID $CID"
-
-  # do a basic install
-  tmptest=$(runtest config:$path $PAUSE $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml")
+for t in $testlist; do
+  tmptest=$(test_${t})
   # output them here in case anything crashes later
   echo "$tmptest"
   RESULTS="$RESULTS"$'\n'"$tmptest"
-
-  docker stop $CID
-
 done
-
-########
-#
-# Test changing config file dynamically
-#
-#######
-# set the original config
-setconfig $RUNDIR/config kubesync-original.json
-
-# clean out and set up repos
-stop_services
-start_services
-init_repos "app1 app2 app3 system"
-
-CID=$(drun -e CONFIG=$path -e VERSION_MODE=branch:master $IMAGE)
-ALLCID="$ALLCID $CID"
-
-# do an install with the original config
-tmptest=$(runtest config:dynamic-original $PAUSE $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml")
-# output them here in case anything crashes later
-echo "$tmptest"
-RESULTS="$RESULTS"$'\n'"$tmptest"
-
-# set the modified config
-setconfig $RUNDIR/config kubesync-modified.json
-
-# do an install with the original config
-tmptest=$(runtest config:dynamic-modified $PAUSE $RUNDIR $CRUNDIR "app3/one.yml:app3/kube.yml")
-# output them here in case anything crashes later
-echo "$tmptest"
-RESULTS="$RESULTS"$'\n'"$tmptest"
-
-docker stop $CID
-
-
 
 #####
 #
@@ -340,8 +483,8 @@ echo
 
 # did we pass everything?
 if echo "$RESULTS" | grep -q FAIL ; then
-exit 1
+doexit 1
 else
-exit 0
+doexit 0
 fi
 

@@ -50,6 +50,13 @@ We have the following repos created:
 
 The repo `system` is meant to contain system-level ("privileged") services. When we support distinguishing privileged from non-privileged services, we will place privileged ones _only_ in `system`.
 
+### Configuration
+The tests are configured in two ways:
+
+* `DEBUG`: set the env var `DEBUG=true` to have the test run in debug mode. In addition to running any shells as `set -x`, it also will run any containers in debug mode, including the kubesync container, and will output the logs from those containers. Finally, it will leave the kubesync containers around, so you can run `docker logs` on them afterwards.
+* selecting tests: By default, `make test`, or just `test/test.sh`, will run all tests. You can select individual tests by running `test/test.sh <test1> <test2> ... <testn>`, or `make test TESTS="test names"`. To list all available tests, run `test/test.sh help` or `make test TESTS=help` or just `make test-help`.
+
+
 ## Unit Tests
 For now, the above are complete integration tests. This should be augmented with proper unit tests. This will happen in one of two ways (whichever comes first):
 

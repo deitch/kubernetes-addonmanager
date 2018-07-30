@@ -115,6 +115,7 @@ The following are configuration options. They are in two groups:
 * `KUBECTL_OPTIONS`: A string of options to pass to `kubectl`, e.g. `KUBECTL_OPTIONS="--kubeconfig=/some/path --context=mykube"`
 * `CURL_OPTIONS`: A string of options to pass to `curl`, if used when downloading config from `http://` or `https://` urls, e.g. `CURL_OPTIONS="--capath /var/lib/certs"`. This is the place to include SSL options, e.g. a custom cert, and http authentication options.
 * `DRYRUN`: do not `kubectl apply` to the output, but run every other step
+* `ONCE`: run the entire loop exactly once and exit. Used primarily for testing purposes.
 
 ### Repo
 Repos with the actual resources to sync to your kubernetes cluster are configured in a configuration file. The configuration file should be [json](http://www.json.org) or [yml](http://yaml.org). `kubesync` will try to parse the config file first as `json`, and then as `yml`. If both fail, the processing fails and exits.
@@ -124,7 +125,6 @@ The format of the config file is an array of objects, each of which has the foll
 * `url`: full URL (https only) to the git repo. **Required**
 * `cmd`: optional transformation command to run once repository is cloned or, after each interval, updated. If not provided, no transformation command is run. If the command specified by `cmd` does not exist, no transformation will be run. It is the equivalent of `[ -e $cmd ] && $cmd `.
 * `ymldir`: directory where the source yml files should be found, passed to `kubectl apply -f <YMLDIR>`. By default, root of the repository, but may be different, e.g. if `cmd` puts the output files in a different directory, for example `kubernetes/`.
-*  `priviliged`: whether or not the kubernetes files in this repo have the right to run privileged containers or install into `kube-system`. Defaults to `false`. **Not yet supported**. Until it is, _all_ repositories' `yml` foles can deploy privileged containers.
 
 `kubectl apply` reads the files from the following directory:
 
@@ -149,7 +149,6 @@ In addition, we run `envsubst` on the cmdline, so any usage of `$INDIR` or `$OUT
 }
 ```
 
-
 ## Sample Configuration
 
 The following are example repository configs. They also are included in this repository as `kubesync.json` and `kubesync.yml`, respectively.
@@ -158,8 +157,7 @@ The following are example repository configs. They also are included in this rep
 [
   {
     "url": "https://github.com/foo/kube-system",
-    "cmd": "./transform.sh",
-    "privileged": true
+    "cmd": "./transform.sh"
   },
   {
     "url": "https://github.com/bar/app1",
@@ -174,7 +172,6 @@ The following are example repository configs. They also are included in this rep
 ```yml
 - url: https://github.com/foo/kube-system
   cmd: ./transform.sh
-  privileged: true
 - url: https://github.com/bar/app1
   ymldir: kubernetes_dir/
 - url: https://github.com/zad/app2
