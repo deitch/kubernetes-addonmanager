@@ -1,8 +1,7 @@
 [
   {
     "url": "https://git/system.git",
-    "ymldir": "kubernetes/",
-    "privileged": true
+    "ymldir": "kubernetes/"
   },
   {
     "url": "https://git/app1.git"

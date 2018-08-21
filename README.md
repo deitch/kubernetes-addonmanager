@@ -125,6 +125,7 @@ The format of the config file is an array of objects, each of which has the foll
 * `url`: full URL (https only) to the git repo. **Required**
 * `cmd`: optional transformation command to run once repository is cloned or, after each interval, updated. If not provided, no transformation command is run. If the command specified by `cmd` does not exist, no transformation will be run. It is the equivalent of `[ -e $cmd ] && $cmd `.
 * `ymldir`: directory where the source yml files should be found, passed to `kubectl apply -f <YMLDIR>`. By default, root of the repository, but may be different, e.g. if `cmd` puts the output files in a different directory, for example `kubernetes/`.
+*  `priviliged`: whether or not the kubernetes files in this repo have the right to run privileged containers or install into `kube-system`. Defaults to `false`. See details on implementation below.
 
 `kubectl apply` reads the files from the following directory:
 
@@ -149,6 +150,54 @@ In addition, we run `envsubst` on the cmdline, so any usage of `$INDIR` or `$OUT
 }
 ```
 
+## Privileged
+As described above, resources deployed to kubernetes generally fall into two broad categories.
+
+* Privileged resources are those that manage the system itself, with higher permission levels, e.g. running in the host's network namespace, running in the kubernetes `kube-system` namespace, or having higher capabilities and permissions.
+* Regular resources are just applications, with none of the above.
+
+kubesync supports distinguishing between "privileged" repos, or repos where you would store such system services, and "regular" repos. In a normal deployment, you will have just one or two privileged repos, but possibly many regular repos.
+
+By default, kubesync treats each repo in its configuration as unprivileged, i.e. without higher-level permissions. To enable the deployment files in a repo to be privileged, simply mark it as so:
+
+```json
+  {
+    "url": "https://github.com/foo/kube-system",
+    "privileged": true
+  }
+```
+
+kubesync enforces the privilege limitations at two levels:
+
+1. Parsing
+2. Deployment rights
+
+#### Parsing
+Before kubesync deploys configuration files from an unprivileged repo to kubernetes, it parses each file to check if it tries to do something privileged. If it does, parsing is stopped and deployment does not happen. kubesync looks for the following:
+
+* `hostNetwork: true`
+* `namespace: kube-system`
+
+kubesync does _not_ check the following:
+
+* privilege escalation: the logic for privilege escalation is complex, and already is built into kubernetes
+* security context: the logic for enforcing security contexts is built into kubernetes, and we do not want to replicate it
+
+We **strongly** recommend you not rely solely on kubesync's parsing, which only is intended as a safety valve. You should use [PodSecurityPolicy](https://kubernetes.io/docs/concepts/policy/pod-security-policy/) and proper vetting of your configuration files.
+
+#### Deployment Rights
+The kubesync deployment creates the following in installation:
+
+* `kubesync` service account in the `kube-system` namespace
+* `ClusterRoleBinding` from the `kubesync` service account to the `ClusterRole cluster-admin`, granting it the right to do nearly anything
+
+In addition, when running, kubesync checks each namespace _except_ `kube-system` and creates a `RoleBinding` from the user `kubesync-limited` to the `ClusterRole admin` in each namespace.
+
+When kubesync applies the configuration from a repository, it does the following:
+
+* If the repository is configured as `privileged: true`, then apply it as the `kubesync` service account, i.e. bound to the `system:masters ClusterRole`
+* If the repository is not configured as `privileged: true`, then apply it as the `kubesync-limited` user, i.e. restricted 
+
 ## Sample Configuration
 
 The following are example repository configs. They also are included in this repository as `kubesync.json` and `kubesync.yml`, respectively.
@@ -157,7 +206,8 @@ The following are example repository configs. They also are included in this rep
 [
   {
     "url": "https://github.com/foo/kube-system",
-    "cmd": "./transform.sh"
+    "cmd": "./transform.sh",
+    "privileged": true
   },
   {
     "url": "https://github.com/bar/app1",
@@ -172,6 +222,7 @@ The following are example repository configs. They also are included in this rep
 ```yml
 - url: https://github.com/foo/kube-system
   cmd: ./transform.sh
+  privileged: true
 - url: https://github.com/bar/app1
   ymldir: kubernetes_dir/
 - url: https://github.com/zad/app2

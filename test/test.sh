@@ -223,11 +223,14 @@ copy_and_commit() {
   local src=
   local target=
   local targetdir=
+  local reporoots=
  
   for i in $cplist; do
     # split on : to find source and target
     src=${i%%:*}
     target=${i##*:}
+    # get the basename
+    reporoots="${reporoots} ${src%%/*}"
     # make sure the dir exists
     targetdir=$(dirname $target)
     if [ ! -d $rundir/tmp/$targetdir ]; then
@@ -236,7 +239,10 @@ copy_and_commit() {
     cp $rundir/kubernetes/$src $rundir/tmp/$target
   done
 
-  commit_and_push $crundir "app1 app2 app3 system" >&2
+  # reporoots contains the names of all of the base dirs
+  # uniqify, and then process
+  reporoots=$(echo "${reporoots}" | tr ' ' '\n' | sort -u)
+  commit_and_push $crundir "${reporoots}" >&2
 }
 
 
@@ -247,8 +253,7 @@ copy_and_commit() {
 ######
 
 # to run all
-#ALLTESTS="versionmodes configpaths dynamicconfig rolebinding privileged"
-ALLTESTS="versionmodes configpaths dynamicconfig rolebinding"
+ALLTESTS="versionmodes configpaths dynamicconfig rolebinding privileged"
 
 # Test different VERSION_MODE settings
 test_versionmodes() {
@@ -411,7 +416,9 @@ test_rolebinding() {
 
 # Test privileged and unprivileged
 test_privileged() {
-  # set the original config
+  local tmptest=
+  local results=
+  # set the original config with privileged rights
   setconfig $RUNDIR/config kubesync-original.json
 
   # clean out and set up repos
@@ -420,13 +427,34 @@ test_privileged() {
   init_repos "app1 app2 app3 system"
 
   # do an install with the original config
-  copy_and_commit $RUNDIR $CRUNDIR "app1/one.yml:app1/kube.yml app2/one.yml:app2/kube.yml system/kubernetes/one.yml:system/kubernetes/kube.yml"
+  copy_and_commit $RUNDIR $CRUNDIR "system/kubernetes/one.yml:system/kubernetes/kube.yml"
 
   # run it to update
   OUTPUT=$(drunonce -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=branch:master $IMAGE)
 
-  tmptest=$(testit privileged $RUNDIR)
-  echo "$tmptest"
+  tmptest=$(testit privileged:privileged $RUNDIR)
+  results="$results"$'\n'"$tmptest"
+
+  # now test without rights
+  tmptest=
+  stop_services
+  setconfig $RUNDIR/config kubesync-unprivileged.json
+  start_services
+  init_repos "app1 app2 app3 system"
+
+  # do an install with unprivileged config
+  copy_and_commit $RUNDIR $CRUNDIR "system/kubernetes/one.yml:system/kubernetes/kube.yml"
+
+  # now it should fail with errors
+  OUTPUT=$(drunonce -e CONFIG=$CRUNDIR/config/kubesync.json -e VERSION_MODE=branch:master $IMAGE)
+  if ! echo "$OUTPUT" | grep -q -i "Unprivileged repo requires privilege"; then
+    tmptest="FAIL privileged:unprivileged"
+  else
+    tmptest="PASS privileged:unprivileged"
+  fi
+  results="$results"$'\n'"$tmptest"
+
+  echo "$results"
 }
 
 

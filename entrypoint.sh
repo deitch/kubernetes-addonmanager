@@ -127,6 +127,104 @@ update_repo() {
   git remote update origin --prune
 }
 
+validate_privileged() {
+  local privileged="$1"
+  local ymldir="$2"
+  local errors=
+  local json=
+
+  # if we are privileged, then it is valid
+  if [ "$privileged" = "true" ]; then
+    return
+  fi
+
+  # check each file in the dir that it has none of the privileged behaviours
+  for i in $ymldir/*; do
+    # we care only about yml and json files
+    case $i in
+      *.yml|*.yaml)
+        json=$(cat $i | yq r -j -d'*' -)
+        ;;
+      *.json)
+        # just take contents, but wrap in array if it is not already
+        json=$(cat $i | jq 'if type=="array" then . else [.] end')
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    
+    # process the content of the json
+    # three possibilities:
+    #  1- it is a `Kind: List`, which contains `items: []` array
+    #  2- it is a single document in a file
+    #  3- it is multiple documents in a file, separated by `---`
+    # since we passed all through `yq -d'*' -r`, it will be an array, where we can check each item. This merges 2&3 above.
+    #   we then check if `Kind=List`, and if so, process `items` array iteratively
+    # samples of each:
+    # - `Kind:List`: [{"apiVersion":"v1","items":[{"apiVersion":"v1","kind":"Service","metadata":{"name":"list-service-test"},"spec":{"ports":[{"port":80,"protocol":"TCP"}],"selector":{"app":"list-deployment-test"}}},{"apiVersion":"extensions/v1beta1","kind":"Deployment","metadata":{"labels":{"app":"list-deployment-test"},"name":"list-deployment-test"},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"list-deployment-test"}},"spec":{"containers":[{"image":"nginx","name":"nginx"}]}}}}],"kind":"List"}]
+    # - Single doc: [{"apiVersion":"v1","kind":"Service","metadata":{"name":"list-service-test"},"spec":{"ports":[{"port":80,"protocol":"TCP"}],"selector":{"app":"list-deployment-test"}}}]
+    # - Multiple docs: [{"apiVersion":"v1","kind":"Service","metadata":{"name":"list-service-test"},"spec":{"ports":[{"port":80,"protocol":"TCP"}],"selector":{"app":"list-deployment-test"}}},{"apiVersion":"extensions/v1beta1","kind":"Deployment","metadata":{"labels":{"app":"list-deployment-test"},"name":"list-deployment-test"},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"list-deployment-test"}},"spec":{"containers":[{"image":"nginx","name":"nginx"}]}}}}]
+    
+    # everything is an array, so loop through elements
+    for elm in $(echo "$json" | jq -c '.[]' ); do
+      needs_privilege=$(check_privileged "$elm")
+      if [ -n "$needs_privilege" ]; then
+        errors="$errors $i"
+      fi
+    done 
+  done
+  
+  # did we find any?
+  if [ -n "$errors" ]; then
+    return 1
+  fi
+
+  return
+}
+
+# check if a json has elements that need privilege
+check_privileged() {
+  local json="$1"
+  if [ -z "$json" ]; then
+    return
+  fi
+
+  # now process the info
+  # if it is an array, call ourselves recursively
+  local jsontype=$(echo "$json" | jq -r 'type')
+  local kind=$(echo "$json" | jq -r '.Kind')
+  if [ "$jsontype" = "array" ]; then
+    for elm in $(echo "$json" | jq -c '.[]' ); do
+      needs_privilege=$(check_privileged "$elm")
+      if [ -n "$needs_privilege" ]; then
+        echo "$needs_privilege"
+        return
+      fi
+    done
+  elif [ "$kind" = "List" ]; then
+    for elm in $(echo "$json" | jq '.items[]' ); do
+      needs_privilege=$(check_privileged "$elm")
+      if [ -n "$needs_privilege" ]; then
+        echo "$needs_privilege"
+        return
+      fi
+    done
+  else
+    # we have a single item, so check its privilege
+    local hostnet=$(echo "$json" | jq -r '.. | .hostNetwork? | select(type != "null")')
+    local namespace=$(echo "$json" | jq -r '.metadata.namespace')
+    if [ "$hostnet" = "true" ]; then
+      echo "hostNetwork"
+      return
+    fi
+    if [ "$namespace" = "kube-system" ]; then
+      echo "namespace"
+      return
+    fi
+  fi
+}
+
 checkout_version() {
   local versiontype=$1
   local versiondetail=$2
@@ -223,7 +321,8 @@ preprocess() {
 
 apply() {
   local ymldir=$1
-  local dryrun=$2
+  local privileged=$2
+  local dryrun=$3
 
   set +e 
   if [ -n "$dryrun" ]; then
@@ -289,6 +388,7 @@ run() {
     repo=$(echo $json | jq -r ".[$j].url")
     cmd=$(echo $json | jq -r ".[$j] | select(.cmd) | .cmd")
     ymldir=$(echo $json | jq -r ".[$j] | select(.ymldir) | .ymldir")
+    privileged=$(echo $json | jq -r ".[$j] | select(.privileged) | .privileged")
     reponame=$(repotodir $repo)
 
     # we need a repo
@@ -322,7 +422,8 @@ run() {
     update_repo
     checkout_version $versiontype $versiondetail || (j=$(( $j + 1 )) && continue)
     preprocess "$cmd" "$PWD" "$tmpoutdir" "$ymldir"
-    apply "$tmpoutdir" "$DRYRUN" || (j=$(( $j + 1 )) && continue)
+    validate_privileged "$privileged" "$tmpoutdir" || (log "ERROR: Unprivileged repo requires privilege ${reponame}" && j=$(( $j + 1 )) && continue)
+    apply "$tmpoutdir" "$privileged" "$DRYRUN" || (j=$(( $j + 1 )) && continue)
 
     j=$(( $j + 1 ))
   done
